@@ -3,8 +3,19 @@
 Settings app for Nekoland, styled after macOS System Settings, written in C
 with GTK4 + libadwaita. Colors come from the system GTK theme's named palette
 (catppuccin via libadwaita-without-adwaita), so it follows theme/flavor
-changes automatically; only the layout is hard-coded macOS. Currently a blank
-skeleton — no settings pages yet.
+changes automatically; only the layout is hard-coded macOS.
+
+Pages so far: **Sound** — layout follows the Settings.dc.html mockup: slim
+pane header, 560px centered column, macOS-style form rows (right-aligned
+label column). Contains a live spectrum visualizer (cava raw-ascii →
+GtkDrawingArea), Output volume + Balance sliders (balance preserved via
+per-channel `pactl set-sink-volume`), OUTPUT/INPUT device cards with
+transport tags (USB/HDMI/…) and accent checkmarks (click to set default,
+unplugged ports grayed), a live input level meter (parec on the default
+source), and an **Advanced…** modal with per-device visibility switches.
+Hidden devices go to `~/.config/nekoland/hidden-audio.conf` (one name per
+line), which nekobar's quick settings also honors. `NEKOLAND_ADVANCED=1`
+opens the modal on startup (dev hook).
 
 ## Build & run
 
@@ -24,9 +35,9 @@ make
   binary). Includes an icon-tile palette (`.icon-blue`, `.icon-red`, …) for
   future sidebar categories.
 
-## Adding a category later
+## Adding a category
 
-`add_category(id, title, icon_name, color_class, page)` in main.c wires a
-sidebar row (colored rounded-square icon + label) to a page in the content
-stack. Selection switching is already handled; the function is unused until
-the first real settings page exists.
+`add_category(id, title, glyph, color_class, page)` in main.c wires a sidebar
+row (colored icon tile with a nerd-font glyph + label) to a page in the
+content stack; see the "sound" category + `src/audio.c` for the pattern
+(page module exposes `<name>_page_new()`).

@@ -4,32 +4,59 @@
 #include <adwaita.h>
 #include <gtk/gtk.h>
 
+#include "app.h"
+
 static GtkWidget *sidebar_list;
 static GtkWidget *content_stack;
 
-// Add a category: colored rounded-square icon + label in the sidebar, and a
-// (currently empty) page in the content stack. Unused until settings exist.
-G_GNUC_UNUSED
-static void add_category(const char *id, const char *title,
-                         const char *icon_name, const char *color_class,
-                         GtkWidget *page) {
+static gboolean debug_dump_idle(gpointer data) {
+    GtkWidget *lbl = data;
+    GtkWidget *box = gtk_widget_get_parent(lbl);
+    graphene_rect_t b;
+    if (gtk_widget_compute_bounds(lbl, box, &b))
+        g_printerr("DBG label in box: x=%.0f w=%.0f (box w=%d) halign=%d "
+                   "hexpand=%d xalign=%.1f\n",
+                   b.origin.x, b.size.width, gtk_widget_get_width(box),
+                   gtk_widget_get_halign(lbl), gtk_widget_get_hexpand(lbl),
+                   gtk_label_get_xalign(GTK_LABEL(lbl)));
+    return FALSE;
+}
+
+static void debug_dump_geometry(GtkWidget *lbl, gpointer data) {
+    (void)data;
+    g_idle_add(debug_dump_idle, lbl);
+}
+
+// Add a category: colored rounded-square icon tile + label in the sidebar,
+// and its page in the content stack. Glyphs are nerd-font characters (the
+// installed icon theme lacks many symbolic icons).
+static void add_category(const char *id, const char *title, const char *glyph,
+                         const char *color_class, GtkWidget *page) {
     GtkWidget *row = gtk_list_box_row_new();
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_add_css_class(box, "category-row");
 
-    GtkWidget *icon_bg = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_widget_add_css_class(icon_bg, "category-icon");
+    // the label IS the tile: CSS min-width/min-height form the colored
+    // square and the label centers its glyph in it (no wrapper box, no
+    // expand flags to leak into the row's space distribution)
+    GtkWidget *icon = gtk_label_new(glyph);
+    gtk_widget_add_css_class(icon, "category-icon");
     if (color_class)
-        gtk_widget_add_css_class(icon_bg, color_class);
-    GtkWidget *icon = gtk_image_new_from_icon_name(icon_name);
-    gtk_widget_set_halign(icon, GTK_ALIGN_CENTER);
+        gtk_widget_add_css_class(icon, color_class);
     gtk_widget_set_valign(icon, GTK_ALIGN_CENTER);
-    gtk_widget_set_hexpand(icon, TRUE);
-    gtk_box_append(GTK_BOX(icon_bg), icon);
-
-    gtk_box_append(GTK_BOX(box), icon_bg);
-    gtk_box_append(GTK_BOX(box), gtk_label_new(title));
+    gtk_box_append(GTK_BOX(box), icon);
+    GtkWidget *title_lbl = gtk_label_new(title);
+    // halign FILL + xalign 0: the label owns its whole slot and pins the
+    // text left, immune to whatever repositions START-aligned children here
+    gtk_label_set_xalign(GTK_LABEL(title_lbl), 0.0);
+    gtk_widget_set_halign(title_lbl, GTK_ALIGN_FILL);
+    gtk_widget_set_hexpand(title_lbl, TRUE);
+    gtk_box_append(GTK_BOX(box), title_lbl);
     gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
+    if (g_getenv("NEKOLAND_DEBUG_LAYOUT")) {
+        g_signal_connect(title_lbl, "map", G_CALLBACK(debug_dump_geometry),
+                         box);
+    }
     g_object_set_data_full(G_OBJECT(row), "page-id", g_strdup(id), g_free);
     gtk_list_box_append(GTK_LIST_BOX(sidebar_list), row);
 
@@ -59,6 +86,12 @@ static void load_css(void) {
     g_free(css);
     g_free(dir);
     g_free(exe);
+}
+
+static void on_window_destroy(GtkWidget *w, gpointer data) {
+    (void)w;
+    (void)data;
+    audio_shutdown();
 }
 
 static void activate(AdwApplication *app, gpointer data) {
@@ -119,6 +152,12 @@ static void activate(AdwApplication *app, gpointer data) {
     gtk_box_append(GTK_BOX(empty), empty_label);
     gtk_stack_add_named(GTK_STACK(content_stack), empty, "empty");
 
+    // categories
+    add_category("sound", "Sound", "", "icon-red", audio_page_new());
+    gtk_list_box_select_row(
+        GTK_LIST_BOX(sidebar_list),
+        gtk_list_box_get_row_at_index(GTK_LIST_BOX(sidebar_list), 0));
+
     gtk_box_append(GTK_BOX(root), content_stack);
 
     // lone macOS-style close dot floating over the sidebar's top-left
@@ -135,7 +174,12 @@ static void activate(AdwApplication *app, gpointer data) {
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), close_btn);
 
     gtk_window_set_child(GTK_WINDOW(win), overlay);
+    g_signal_connect(win, "destroy", G_CALLBACK(on_window_destroy), NULL);
     gtk_window_present(GTK_WINDOW(win));
+
+    // dev hook: NEKOLAND_ADVANCED=1 opens the advanced modal on startup
+    if (g_getenv("NEKOLAND_ADVANCED"))
+        audio_open_advanced(GTK_WINDOW(win));
 }
 
 int main(int argc, char **argv) {

@@ -49,8 +49,30 @@ static void sink_free(gpointer p) {
     g_free(s);
 }
 
+// sinks hidden via nekoland-settings (Sound → Advanced)
+static GHashTable *load_hidden(void) {
+    GHashTable *set =
+        g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    char *path = g_build_filename(g_get_user_config_dir(), "nekoland",
+                                  "hidden-audio.conf", NULL);
+    char *data = NULL;
+    if (g_file_get_contents(path, &data, NULL, NULL)) {
+        char **lines = g_strsplit(data, "\n", -1);
+        for (char **l = lines; *l; l++) {
+            g_strstrip(*l);
+            if (**l)
+                g_hash_table_add(set, g_strdup(*l));
+        }
+        g_strfreev(lines);
+        g_free(data);
+    }
+    g_free(path);
+    return set;
+}
+
 static GPtrArray *list_sinks(void) {
     GPtrArray *sinks = g_ptr_array_new_with_free_func(sink_free);
+    GHashTable *hidden = load_hidden();
 
     char *def = NULL;
     char *argv_def[] = {"pactl", "get-default-sink", NULL};
@@ -69,8 +91,11 @@ static GPtrArray *list_sinks(void) {
             JsonArray *arr = json_node_get_array(json_parser_get_root(p));
             for (guint i = 0; i < json_array_get_length(arr); i++) {
                 JsonObject *o = json_array_get_object_element(arr, i);
+                const char *name = json_object_get_string_member(o, "name");
+                if (g_hash_table_contains(hidden, name))
+                    continue;
                 Sink *s = g_new0(Sink, 1);
-                s->name = g_strdup(json_object_get_string_member(o, "name"));
+                s->name = g_strdup(name);
                 s->desc =
                     g_strdup(json_object_get_string_member(o, "description"));
                 s->is_default = def && g_str_equal(s->name, def);
@@ -101,6 +126,7 @@ static GPtrArray *list_sinks(void) {
         }
         g_object_unref(p);
     }
+    g_hash_table_destroy(hidden);
     g_free(out);
     g_free(def);
     return sinks;
