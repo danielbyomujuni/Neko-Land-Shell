@@ -1,0 +1,154 @@
+/* Ported 1:1 from ~/.config/waybar/style.css (Catppuccin Mocha) */
+
+* {
+  font-family: "JetBrainsMono Nerd Font";
+  font-size: 8.5pt;
+  font-weight: 800;
+  color: #cdd6f4;
+}
+
+window#nekobar {
+  background: none;
+}
+
+#bar-box {
+  background: #11111b;
+  border-radius: 12pt;
+  border: solid 2px;
+  border-color: #1e1e2e;
+  margin: 6pt;
+  padding: 2pt;
+}
+
+/* flat icon buttons */
+#rofi,
+#color-picker,
+#screenshot,
+#wallpaper,
+#power,
+#pulseaudio {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  min-width: 0;
+  min-height: 0;
+}
+
+#rofi {
+  margin-left: 7pt;
+  padding-right: 3pt;
+  font-size: 12pt;
+}
+#rofi * { font-size: 12pt; }
+
+#workspaces {
+  margin-left: 12pt;
+}
+#workspaces button {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0 2pt;
+  min-width: 0;
+  min-height: 0;
+  color: #585b70;
+}
+#workspaces button * { color: inherit; }
+#workspaces button:not(:first-child) {
+  margin-left: 2pt;
+}
+#workspaces button.visible {
+  color: #89b4fa;
+}
+#workspaces button.active {
+  color: #f38ba8;
+}
+#workspaces button:hover,
+#workspaces button:focus {
+  background: none;
+  border-color: transparent;
+  box-shadow: none;
+}
+#workspaces button:hover:not(.active):not(.visible) {
+  color: #9399b2;
+}
+
+#mpris {
+  background: #1e1e2e;
+  border: none;
+  box-shadow: none;
+  border-radius: 12pt;
+  margin-left: 15pt;
+  padding: 0 8pt;
+  min-height: 0;
+}
+#mpris * { color: #a6e3a1; }
+
+#window-title {
+  margin-left: 15pt;
+  margin-right: 20pt;
+}
+
+#memory {
+  color: #fab387;
+  margin-right: 12pt;
+}
+
+#tray {
+  margin-right: 10pt;
+}
+#tray button {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* tray menus (dbusmenu popups), like waybar's #tray menu */
+menu {
+  background: #1e1e2e;
+  padding: 2pt;
+}
+menu menuitem {
+  margin: 2pt;
+}
+menu check {
+  margin-right: 4pt;
+}
+
+#pulseaudio {
+  margin-right: 10pt;
+}
+#pulseaudio * { color: #74c7ec; }
+
+#color-picker {
+  margin-right: 18pt;
+}
+#color-picker * { font-size: 9pt; }
+
+#screenshot {
+  margin-right: 18pt;
+}
+#screenshot * { font-size: 10pt; }
+
+#wallpaper {
+  margin-right: 16pt;
+}
+#wallpaper * { font-size: 12pt; }
+
+#power {
+  margin-right: 11pt;
+}
+#power * { font-size: 10pt; }
+
+#wallpaper:hover,
+#screenshot:hover,
+#color-picker:hover,
+#power:hover,
+#pulseaudio:hover,
+#rofi:hover {
+  opacity: 0.6;
+}

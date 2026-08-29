@@ -1,0 +1,10 @@
+singleton Theme 1.0 Theme.qml
+Bar 1.0 Bar.qml
+IconButton 1.0 IconButton.qml
+Workspaces 1.0 Workspaces.qml
+ClockWidget 1.0 ClockWidget.qml
+MemoryWidget 1.0 MemoryWidget.qml
+WindowTitle 1.0 WindowTitle.qml
+MprisWidget 1.0 MprisWidget.qml
+VolumeWidget 1.0 VolumeWidget.qml
+TrayWidget 1.0 TrayWidget.qml
