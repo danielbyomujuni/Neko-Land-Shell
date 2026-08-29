@@ -12,17 +12,22 @@
 
 typedef struct RgbProvider RgbProvider;
 
+#define RGB_MAX_LEDS 32
+
 typedef struct {
     const RgbProvider *provider;
     char *id;   // provider-specific handle (e.g. "/dev/i2c-14:0x71")
     char *name;
-    char *type;       // DRAM / GPU / LED Strip / ... shown as a row tag
+    char *type;       // chip group: Memory / GPU / Case fans / ...
     GPtrArray *modes; // char*
     int cur_mode;     // index into modes, -1 if unknown
     GdkRGBA color;    // chosen colour (unscaled; brightness applied on send)
     double brightness; // 0..1, multiplied into the colour on send
     int speed;         // 0..100, used by providers with a speed control
     gboolean enabled;  // row switch; off = lighting off for this device
+    gboolean has_speed; // FALSE when the protocol has no speed control
+    int n_leds;        // >0 when the provider supports per-LED painting
+    GdkRGBA led_colors[RGB_MAX_LEDS]; // UI-side per-LED state
 } RgbDevice;
 
 struct RgbProvider {
@@ -32,6 +37,9 @@ struct RgbProvider {
     void (*set_mode)(RgbDevice *d, const char *mode);
     // optional: apply one colour to every device in a single operation
     void (*set_color_all)(const GdkRGBA *c);
+    // optional: set a single LED (for devices with n_leds > 0); the colour
+    // arrives pre-scaled by brightness; may be NULL
+    void (*set_led)(RgbDevice *d, int led, const GdkRGBA *c);
 };
 
 RgbDevice *rgb_device_new(const RgbProvider *p, const char *id,

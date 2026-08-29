@@ -237,6 +237,102 @@ separator {
   padding-top: 0;
 }
 
+/* device chips (selectable grid) */
+
+/* flowbox wrapper cells around chips */
+flowboxchild {
+  padding: 0;
+  background: none;
+}
+.dev-chip {
+  min-width: 120px;
+  background: shade(@window_bg_color, 1.75);
+  border: none;
+  box-shadow: none;
+  border-radius: 8px;
+  padding: 10px 11px;
+  min-height: 0;
+}
+.dev-chip:hover {
+  background: shade(@window_bg_color, 2.1);
+}
+.dev-chip.sel {
+  background: alpha(@accent_bg_color, 0.16);
+  box-shadow: 0 0 0 1.5px @accent_bg_color;
+}
+.chip-title {
+  font-size: 12.5px;
+  color: @view_fg_color;
+}
+.dev-chip.sel .chip-title {
+  color: @accent_color;
+}
+.chip-sub {
+  font-size: 11px;
+  color: alpha(@view_fg_color, 0.6);
+}
+
+/* segmented sync toggle */
+.seg-box {
+  background: @view_bg_color;
+  border-radius: 6px;
+  padding: 2px;
+}
+.seg-btn {
+  background: none;
+  border: none;
+  box-shadow: none;
+  border-radius: 5px;
+  padding: 3px 0;
+  min-height: 0;
+  font-size: 12.5px;
+  color: alpha(@view_fg_color, 0.6);
+}
+.seg-btn.sel {
+  background: @accent_bg_color;
+  color: @accent_fg_color;
+}
+
+/* member (stick) bars + LED paint cells */
+.stick-bar {
+  background: none;
+  border: none;
+  box-shadow: none;
+  border-radius: 6px;
+  padding: 4px 8px;
+  min-height: 0;
+}
+.stick-bar:hover {
+  background: alpha(@window_fg_color, 0.05);
+}
+.stick-bar.sel {
+  background: alpha(@accent_bg_color, 0.16);
+  box-shadow: 0 0 0 1.5px @accent_bg_color;
+}
+.led-cell {
+  background: none;
+  border: none;
+  box-shadow: none;
+  border-radius: 4px;
+  padding: 2px;
+  min-height: 0;
+  min-width: 0;
+}
+.led-cell:hover {
+  background: alpha(@window_fg_color, 0.1);
+}
+
+/* detail card header strip */
+.detail-header {
+  background: shade(@window_bg_color, 1.35);
+  padding: 9px 12px 9px 14px;
+}
+.detail-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: @view_fg_color;
+}
+
 /* expandable device rows */
 .dev-head {
   padding: 4px 0;
@@ -350,14 +446,13 @@ separator {
   box-shadow: 0 0 0 2px shade(@window_bg_color, 1.75),
               0 0 0 3.5px alpha(@window_fg_color, 0.65);
 }
-.dot-maroon { background: #eba0ac; }
-.dot-red { background: #f38ba8; }
-.dot-peach { background: #fab387; }
-.dot-yellow { background: #f9e2af; }
-.dot-green { background: #a6e3a1; }
-.dot-blue { background: #89b4fa; }
-.dot-lav { background: #b4befe; }
-.dot-mv { background: #cba6f7; }
+.dot-red { background: #ff0000; }
+.dot-orange { background: #ff7a00; }
+.dot-yellow { background: #ffd400; }
+.dot-green { background: #00ff44; }
+.dot-cyan { background: #00e5ff; }
+.dot-blue { background: #0044ff; }
+.dot-magenta { background: #e600ff; }
 .rgb-row label {
   color: @view_fg_color;
   font-size: 13px;
@@ -430,3 +525,13 @@ window#adv-modal {
   color: alpha(@view_fg_color, 0.55);
   font-size: 11pt;
 }
+
+/* disabled rows: hard-coloured dots don't auto-dim, so fade them */
+.form-row:disabled .color-dot,
+.form-row:disabled .rgb-color-btn {
+  opacity: 0.3;
+}
+
+/* hardware test verdicts */
+.test-pass { color: #00ff44; font-size: 12.5px; }
+.test-fail { color: #ff4444; font-size: 12.5px; }

@@ -16,7 +16,10 @@
 #include <unistd.h>
 
 #define GPU_ADDR 0x75
-#define GPU_ZONES 4
+// the Gaming layout expects a packet for hardware zones 0-5 (fewer visible
+// zones, but effects only engage once every hardware zone is configured —
+// verified live: 4-zone breathing stayed static, 6-zone breathes)
+#define GPU_ZONES 6
 #define REG_MODE 0x12
 #define REG_COLOR 0x16
 
@@ -42,6 +45,9 @@ static int gpu_open(const char *id) {
     return fd;
 }
 
+// a uniform colour always travels in the header bytes with ncolors = 0;
+// a non-zero ncolors means per-LED colours (starting at byte 12 on the
+// Gaming layout) and makes the firmware ignore effect packets
 static void gpu_pkt(int fd, guint8 reg, guint8 mode, guint8 speed,
                     guint8 bright, guint8 r, guint8 g, guint8 b,
                     guint8 zone) {
@@ -55,7 +61,6 @@ static void gpu_pkt(int fd, guint8 reg, guint8 mode, guint8 speed,
     p[6] = g;
     p[7] = b;
     p[9] = zone;
-    p[10] = 0x00; // ncolors: 0 = use RGB at [5..7]
     (void)!write(fd, p, sizeof(p));
 }
 
@@ -167,7 +172,7 @@ static void gpu_set_mode(RgbDevice *d, const char *mode) {
         else if (value == -1) // static: direct colour
             gpu_pkt(fd, REG_COLOR, 0x00, gpu_speed(d->speed), 0x0A, r, g, b,
                     (guint8)z);
-        else
+        else // effects: colour in the header (ignored by cycling modes)
             gpu_pkt(fd, REG_MODE, (guint8)value, gpu_speed(d->speed), 0x0A,
                     r, g, b, (guint8)z);
     }

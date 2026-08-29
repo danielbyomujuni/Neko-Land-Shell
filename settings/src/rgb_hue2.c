@@ -9,8 +9,8 @@
 //    (packet formats from liquidctl's control_hub.py, verified live on this
 //     hardware: channels light, GRB order confirmed with pure red)
 //
-// The Kraken 2024 Plus (PID 0x3014) has no RGB LEDs — only an LCD — so it is
-// deliberately not listed here.
+// The Kraken Plus V2 (PID 0x3014) drives its RGB radiator fans with the same
+// Control Hub packets on a single channel; its LCD is a separate feature.
 
 #include "rgb.h"
 
@@ -25,19 +25,20 @@ typedef enum { PROTO_HUE2 = 0, PROTO_CHUB = 1 } NzxtProto;
 static const struct {
     int pid;
     const char *name;
+    const char *type; // chip group in the UI
     int channels;
     NzxtProto proto;
 } nzxt_models[] = {
-    {0x2022, "NZXT RGB & Fan Controller 2024", 5, PROTO_CHUB},
+    {0x2022, "NZXT RGB & Fan Controller 2024", "Case fans", 5, PROTO_CHUB},
     // the Kraken Plus V2 hosts RGB radiator fans on one channel and accepts
     // the same Control Hub LED packets (verified live); its LCD is separate
-    {0x3014, "NZXT Kraken Plus V2 (fans)", 1, PROTO_CHUB},
-    {0x2011, "NZXT RGB & Fan Controller", 3, PROTO_HUE2},
-    {0x2019, "NZXT RGB & Fan Controller", 3, PROTO_HUE2},
-    {0x2009, "NZXT RGB & Fan Controller", 3, PROTO_HUE2},
-    {0x200E, "NZXT RGB & Fan Controller", 3, PROTO_HUE2},
-    {0x2001, "NZXT Hue 2", 4, PROTO_HUE2},
-    {0x2002, "NZXT Hue 2 Ambient", 2, PROTO_HUE2},
+    {0x3014, "NZXT Kraken Plus V2", "AIO cooler", 1, PROTO_CHUB},
+    {0x2011, "NZXT RGB & Fan Controller", "Case fans", 3, PROTO_HUE2},
+    {0x2019, "NZXT RGB & Fan Controller", "Case fans", 3, PROTO_HUE2},
+    {0x2009, "NZXT RGB & Fan Controller", "Case fans", 3, PROTO_HUE2},
+    {0x200E, "NZXT RGB & Fan Controller", "Case fans", 3, PROTO_HUE2},
+    {0x2001, "NZXT Hue 2", "Case fans", 4, PROTO_HUE2},
+    {0x2002, "NZXT Hue 2 Ambient", "Case fans", 2, PROTO_HUE2},
 };
 
 // id format: "/dev/hidrawN:channels:proto"
@@ -143,30 +144,46 @@ static void chub_animated(int fd, int channel, int mode, const GdkRGBA *c,
     chub_speed_bytes(speed, mode == 0x01, &lo, &hi);
     pkt[n++] = lo;
     pkt[n++] = hi;
+    (void)c;
     if (mode == 0x0C) { // super-rainbow: header padding
         pkt[n++] = 0x00;
         pkt[n++] = 0x00;
-    }
-    if (mode == 0x01 && c) { // fading: colours GRB
-        pkt[n++] = (guint8)(c->green * 255 + 0.5);
-        pkt[n++] = (guint8)(c->red * 255 + 0.5);
-        pkt[n++] = (guint8)(c->blue * 255 + 0.5);
     }
     while (n < 56)
         pkt[n++] = 0x00;
     if (mode == 0x02 || mode == 0x0C) // direction byte
         pkt[n++] = 0x00;              // forward
-    if (mode == 0x01)                 // colour count
-        pkt[n++] = 0x01;
-    static const guint8 foot_fading[] = {0x08, 0x18, 0x03, 0x00, 0x00};
     static const guint8 foot_wave[] = {0x00, 0x00, 0x12, 0x03, 0x00, 0x00};
     static const guint8 foot_rainbow[] = {0x00, 0x18, 0x03, 0x00, 0x00};
-    const guint8 *foot = mode == 0x01   ? foot_fading
-                         : mode == 0x02 ? foot_wave
-                                        : foot_rainbow;
-    gsize foot_len = mode == 0x02 ? sizeof(foot_wave) : sizeof(foot_fading);
+    const guint8 *foot = mode == 0x02 ? foot_wave : foot_rainbow;
+    gsize foot_len = mode == 0x02 ? sizeof(foot_wave) : sizeof(foot_rainbow);
     for (gsize i = 0; i < foot_len && n < sizeof(pkt); i++)
         pkt[n++] = foot[i];
+    (void)!write(fd, pkt, sizeof(pkt));
+}
+
+// fading uses liquidctl's Nzxt2023RgbController packet shape, not the
+// control_hub one (0x18 at byte 58 kills the effect on this firmware):
+// [0x2A 0x04 chb chb 0x01 speedlo speedhi GRB…] with direction@55,
+// colour count@56, then 0x08 0x08 0x03. Verified live: the hub fades a
+// single colour on its own; the Kraken shows a single colour as solid and
+// needs an explicit second colour (black) to fade to.
+static void chub_fading(int fd, int channel, const GdkRGBA *c, int speed,
+                        gboolean add_black) {
+    guint8 chb = chub_channel_byte[channel];
+    guint8 pkt[64] = {0x2A, 0x04, chb, chb, 0x01};
+    guint8 lo, hi;
+    chub_speed_bytes(speed, TRUE, &lo, &hi);
+    pkt[5] = lo;
+    pkt[6] = hi;
+    pkt[7] = (guint8)(c->green * 255 + 0.5); // GRB
+    pkt[8] = (guint8)(c->red * 255 + 0.5);
+    pkt[9] = (guint8)(c->blue * 255 + 0.5);
+    pkt[55] = 0x00; // direction: forward
+    pkt[56] = add_black ? 0x02 : 0x01;
+    pkt[57] = 0x08;
+    pkt[58] = 0x08;
+    pkt[59] = 0x03;
     (void)!write(fd, pkt, sizeof(pkt));
 }
 
@@ -210,7 +227,8 @@ static GPtrArray *nzxt_list(void) {
                                    nzxt_models[model].channels,
                                    (int)nzxt_models[model].proto);
         RgbDevice *d = rgb_device_new(&rgb_hue2_provider, id,
-                                      nzxt_models[model].name, "LED Strip");
+                                      nzxt_models[model].name,
+                                      nzxt_models[model].type);
         d->modes = g_ptr_array_new_with_free_func(g_free);
         d->cur_mode = -1; // not readable
         g_ptr_array_add(d->modes, g_strdup("Off"));
@@ -246,7 +264,9 @@ static void nzxt_apply(RgbDevice *d, const char *mode, const GdkRGBA *color) {
             else if (!g_ascii_strcasecmp(mode, "Static"))
                 chub_fixed(fd, ch, color);
             else if (!g_ascii_strcasecmp(mode, "Fading"))
-                chub_animated(fd, ch, 0x01, color, d->speed);
+                // single-channel CHUB = the Kraken, which needs the
+                // explicit fade-to-black second colour
+                chub_fading(fd, ch, color, d->speed, channels == 1);
             else if (!g_ascii_strcasecmp(mode, "Spectrum Cycle"))
                 chub_animated(fd, ch, 0x02, NULL, d->speed);
             else if (!g_ascii_strcasecmp(mode, "Super Rainbow"))

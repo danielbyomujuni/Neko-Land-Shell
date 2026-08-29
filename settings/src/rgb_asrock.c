@@ -15,12 +15,17 @@
 
 #define ASROCK_ZONES 8
 
+// mode values verified live on the X870E Taichi: firmware 0x07 (OpenRGB's
+// "Wave") is the actual all-LED hue cycle, while 0x04 (OpenRGB's "Spectrum
+// Cycle") just flickers the set colour — identical behaviour through the
+// OpenRGB CLI, so it's a firmware quirk, not a packet problem. 0x08 bounces
+// the colour along the strip.
 static const struct {
     const char *name;
     int value;
 } asrock_modes[] = {
-    {"Off", 0x00},      {"Static", 0x01},        {"Breathing", 0x02},
-    {"Strobe", 0x03},   {"Spectrum Cycle", 0x04}, {"Wave", 0x07},
+    {"Off", 0x00},      {"Static", 0x01},         {"Breathing", 0x02},
+    {"Strobe", 0x03},   {"Spectrum Cycle", 0x07}, {"Spring", 0x08},
     {"Rainbow", 0x0E},
 };
 #define ASROCK_N_MODES ((int)G_N_ELEMENTS(asrock_modes))
@@ -122,6 +127,8 @@ static void asrock_set_mode(RgbDevice *d, const char *mode) {
             value = asrock_modes[m].value;
     if (value < 0)
         return;
+    // cycling modes ignore the colour; sending it anyway is safe (black is
+    // not: the colour also feeds the effect's brightness)
     GdkRGBA eff = rgb_effective_color(d);
     asrock_apply(d, value, &eff);
 }

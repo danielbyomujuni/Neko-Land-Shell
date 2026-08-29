@@ -161,8 +161,9 @@ static GPtrArray *ene_list(void) {
             char *id = g_strdup_printf("%s:0x%02x:%04x:%d", node,
                                        ene_addresses[a], base, leds);
             char *label = g_strdup_printf("ENE DRAM (%s)", devname);
-            RgbDevice *d = rgb_device_new(&rgb_ene_provider, id, label, "DRAM");
+            RgbDevice *d = rgb_device_new(&rgb_ene_provider, id, label, "Memory");
             g_free(label);
+            d->n_leds = leds; // per-LED painting supported
             d->modes = g_ptr_array_new_with_free_func(g_free);
             d->cur_mode = -1;
             for (int m = 0; m < ENE_N_MODES; m++) {
@@ -237,9 +238,31 @@ static void ene_set_mode(RgbDevice *d, const char *mode) {
     close(fd);
 }
 
+// paint one LED: touches only that LED's three colour registers, then makes
+// sure the effect engine shows the bank (static + apply)
+static void ene_set_led(RgbDevice *d, int led, const GdkRGBA *c) {
+    guint16 effect_base;
+    int leds;
+    ene_id_params(d->id, &effect_base, &leds);
+    if (led < 0 || led >= leds)
+        return;
+    int fd = ene_open(d->id);
+    if (fd < 0)
+        return;
+    guint16 base = effect_base + led * 3;
+    ene_reg_write(fd, base + 0, (guint8)(c->red * 255 + 0.5));
+    ene_reg_write(fd, base + 1, (guint8)(c->blue * 255 + 0.5)); // R,B,G
+    ene_reg_write(fd, base + 2, (guint8)(c->green * 255 + 0.5));
+    ene_reg_write(fd, ENE_REG_DIRECT, 0x00);
+    ene_reg_write(fd, ENE_REG_MODE, 1 /* static */);
+    ene_reg_write(fd, ENE_REG_APPLY, ENE_APPLY_VAL);
+    close(fd);
+}
+
 const RgbProvider rgb_ene_provider = {
     .name = "ENE SMBus",
     .list = ene_list,
     .set_color = ene_set_color,
     .set_mode = ene_set_mode,
+    .set_led = ene_set_led,
 };

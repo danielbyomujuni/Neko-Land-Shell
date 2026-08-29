@@ -165,6 +165,7 @@ static GPtrArray *razer_list(void) {
         RazerFound *f = val;
         RgbDevice *d = rgb_device_new(&rgb_razer_provider, f->nodes->str,
                                       f->label, "Keyboard");
+        d->has_speed = FALSE; // extended matrix has no speed parameter
         d->modes = g_ptr_array_new_with_free_func(g_free);
         d->cur_mode = -1;
         for (int m = 0; m < RAZER_N_MODES; m++)
