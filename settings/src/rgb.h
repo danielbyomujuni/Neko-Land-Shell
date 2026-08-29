@@ -26,6 +26,7 @@ typedef struct {
     int speed;         // 0..100, used by providers with a speed control
     gboolean enabled;  // row switch; off = lighting off for this device
     gboolean has_speed; // FALSE when the protocol has no speed control
+    gboolean has_lcd;   // device carries an LCD (Kraken Plus V2)
     int n_leds;        // >0 when the provider supports per-LED painting
     GdkRGBA led_colors[RGB_MAX_LEDS]; // UI-side per-LED state
 } RgbDevice;

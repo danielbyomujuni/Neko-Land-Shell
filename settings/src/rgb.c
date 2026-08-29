@@ -9,6 +9,7 @@
 // machine is handled natively, the OpenRGB CLI fallback covers strangers.
 
 #include "app.h"
+#include "kraken_lcd.h"
 #include "rgb.h"
 
 #include <string.h>
@@ -567,6 +568,98 @@ static void led_cell_free(gpointer data, GClosure *closure) {
     g_free(data);
 }
 
+// ---- Kraken LCD section ----
+
+static int lcd_brightness = -1, lcd_orientation = -1; // cached from device
+static guint lcd_bright_timer;
+static int lcd_bright_pending;
+
+static void lcd_note(const char *msg) {
+    gtk_label_set_text(GTK_LABEL(status_label), msg);
+}
+
+static gboolean lcd_bright_commit(gpointer data) {
+    (void)data;
+    lcd_bright_timer = 0;
+    kraken_lcd_set_brightness(lcd_bright_pending);
+    lcd_brightness = lcd_bright_pending;
+    return G_SOURCE_REMOVE;
+}
+
+static void on_lcd_brightness(GtkRange *range, gpointer data) {
+    (void)data;
+    if (rgb_updating)
+        return;
+    lcd_bright_pending = (int)gtk_range_get_value(range);
+    // debounce: each write is a HID round-trip
+    if (lcd_bright_timer)
+        g_source_remove(lcd_bright_timer);
+    lcd_bright_timer = g_timeout_add(250, lcd_bright_commit, NULL);
+}
+
+static void on_lcd_orientation(GObject *dd, GParamSpec *spec, gpointer data) {
+    (void)spec;
+    (void)data;
+    if (rgb_updating)
+        return;
+    guint sel = gtk_drop_down_get_selected(GTK_DROP_DOWN(dd));
+    lcd_orientation = (int)sel * 90;
+    kraken_lcd_set_orientation(lcd_orientation);
+}
+
+static void on_lcd_liquid(GtkWidget *btn, gpointer data) {
+    (void)btn;
+    (void)data;
+    lcd_note(kraken_lcd_set_liquid() ? "LCD: liquid temperature"
+                                     : "LCD: switch failed");
+}
+
+static void on_lcd_file_done(GObject *src, GAsyncResult *res, gpointer data) {
+    (void)data;
+    GFile *f = gtk_file_dialog_open_finish(GTK_FILE_DIALOG(src), res, NULL);
+    if (!f)
+        return;
+    char *path = g_file_get_path(f);
+    g_object_unref(f);
+    if (!path)
+        return;
+    GError *err = NULL;
+    // handles both stills and animations (animations are streamed)
+    if (kraken_lcd_anim_start(path, &err)) {
+        char *base = g_path_get_basename(path);
+        char buf[160];
+        g_snprintf(buf, sizeof(buf), "LCD: showing %s%s", base,
+                   kraken_lcd_anim_active() ? " (animated)" : "");
+        lcd_note(buf);
+        g_free(base);
+    } else {
+        char buf[160];
+        g_snprintf(buf, sizeof(buf), "LCD: %s",
+                   err ? err->message : "upload failed");
+        lcd_note(buf);
+    }
+    g_clear_error(&err);
+    g_free(path);
+}
+
+static void on_lcd_image(GtkWidget *btn, gpointer data) {
+    (void)data;
+    GtkFileDialog *dlg = gtk_file_dialog_new();
+    gtk_file_dialog_set_title(dlg, "Choose an image for the LCD");
+    GtkFileFilter *filt = gtk_file_filter_new();
+    gtk_file_filter_set_name(filt, "Images");
+    gtk_file_filter_add_pixbuf_formats(filt);
+    GListStore *filters = g_list_store_new(GTK_TYPE_FILE_FILTER);
+    g_list_store_append(filters, filt);
+    gtk_file_dialog_set_filters(dlg, G_LIST_MODEL(filters));
+    g_object_unref(filters);
+    g_object_unref(filt);
+    gtk_file_dialog_open(dlg,
+                         GTK_WINDOW(gtk_widget_get_root(btn)),
+                         NULL, on_lcd_file_done, NULL);
+    g_object_unref(dlg);
+}
+
 static GtkWidget *form_label(const char *text) {
     GtkWidget *l = gtk_label_new(text);
     gtk_widget_add_css_class(l, "form-label");
@@ -819,6 +912,56 @@ static void rebuild_detail(void) {
         gtk_box_append(GTK_BOX(cells), hint);
         gtk_box_append(GTK_BOX(detail_box), row_sep());
         gtk_box_append(GTK_BOX(detail_box), detail_row("LEDs", cells));
+    }
+
+    // Kraken pump-cap LCD controls
+    gboolean group_has_lcd = FALSE;
+    for (guint i = 0; i < selected->members->len; i++)
+        if (((RgbDevice *)g_ptr_array_index(selected->members, i))->has_lcd)
+            group_has_lcd = TRUE;
+    if (group_has_lcd && kraken_lcd_present()) {
+        if (lcd_brightness < 0) // first visit: read current state once
+            kraken_lcd_get_info(&lcd_brightness, &lcd_orientation);
+
+        gtk_box_append(GTK_BOX(detail_box), row_sep());
+
+        GtkWidget *seg = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+        gtk_widget_add_css_class(seg, "seg-box");
+        GtkWidget *liq = gtk_button_new_with_label("Liquid temp");
+        gtk_widget_add_css_class(liq, "seg-btn");
+        gtk_widget_set_hexpand(liq, TRUE);
+        g_signal_connect(liq, "clicked", G_CALLBACK(on_lcd_liquid), NULL);
+        gtk_box_append(GTK_BOX(seg), liq);
+        GtkWidget *img = gtk_button_new_with_label("Image / GIF…");
+        gtk_widget_add_css_class(img, "seg-btn");
+        gtk_widget_set_hexpand(img, TRUE);
+        g_signal_connect(img, "clicked", G_CALLBACK(on_lcd_image), NULL);
+        gtk_box_append(GTK_BOX(seg), img);
+        gtk_box_append(GTK_BOX(detail_box), detail_row("LCD screen", seg));
+        gtk_box_append(GTK_BOX(detail_box), row_sep());
+
+        gtk_box_append(GTK_BOX(detail_box),
+                       detail_row("LCD brightness",
+                                  pct_slider(lcd_brightness >= 0
+                                                 ? lcd_brightness
+                                                 : 80,
+                                             G_CALLBACK(on_lcd_brightness),
+                                             NULL)));
+        gtk_box_append(GTK_BOX(detail_box), row_sep());
+
+        static const char *degs[] = {"0°", "90°", "180°", "270°", NULL};
+        GtkWidget *dd = gtk_drop_down_new_from_strings(degs);
+        gtk_widget_add_css_class(dd, "rgb-mode");
+        gtk_widget_set_halign(dd, GTK_ALIGN_START);
+        gtk_widget_set_valign(dd, GTK_ALIGN_CENTER);
+        rgb_updating = TRUE;
+        if (lcd_orientation >= 0)
+            gtk_drop_down_set_selected(GTK_DROP_DOWN(dd),
+                                       (guint)(lcd_orientation / 90));
+        rgb_updating = FALSE;
+        g_signal_connect(dd, "notify::selected",
+                         G_CALLBACK(on_lcd_orientation), NULL);
+        gtk_box_append(GTK_BOX(detail_box), detail_row("LCD rotation", dd));
     }
 }
 

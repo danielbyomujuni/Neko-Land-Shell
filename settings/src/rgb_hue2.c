@@ -229,6 +229,8 @@ static GPtrArray *nzxt_list(void) {
         RgbDevice *d = rgb_device_new(&rgb_hue2_provider, id,
                                       nzxt_models[model].name,
                                       nzxt_models[model].type);
+        if (nzxt_models[model].pid == 0x3014)
+            d->has_lcd = TRUE; // 240×240 pump-cap screen (kraken_lcd.c)
         d->modes = g_ptr_array_new_with_free_func(g_free);
         d->cur_mode = -1; // not readable
         g_ptr_array_add(d->modes, g_strdup("Off"));
