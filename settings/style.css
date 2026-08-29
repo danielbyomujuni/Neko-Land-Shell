@@ -229,6 +229,164 @@ separator {
   background: @accent_color;
 }
 
+/* rgb page */
+.rgb-row {
+  padding: 5px 14px;
+}
+.rgb-color-row {
+  padding-top: 0;
+}
+
+/* expandable device rows */
+.dev-head {
+  padding: 4px 0;
+}
+.dev-expand {
+  background: none;
+  border: none;
+  box-shadow: none;
+  border-radius: 0;
+  padding: 5px 0 5px 14px;
+  min-height: 0;
+}
+.dev-expand:hover {
+  background: alpha(@window_fg_color, 0.04);
+}
+.dev-expand label {
+  font-size: 13px;
+  color: @view_fg_color;
+}
+.caret {
+  color: alpha(@view_fg_color, 0.6);
+  font-size: 10px;
+  min-width: 14px;
+}
+.dev-subtitle {
+  color: alpha(@view_fg_color, 0.6);
+  font-size: 11.5px;
+}
+.rgb-inset {
+  background: shade(@window_bg_color, 1.3);
+  padding: 4px 0;
+}
+.inset-row {
+  padding: 6px 14px 6px 38px;
+}
+.inset-label {
+  color: alpha(@view_fg_color, 0.78);
+  font-size: 12.5px;
+}
+.rgb-inset scale {
+  min-height: 0;
+  padding: 0;
+}
+.rgb-inset scale trough {
+  min-height: 4px;
+}
+.rgb-inset scale slider {
+  min-height: 14px;
+  min-width: 14px;
+  margin: -5px;
+}
+.form-row scale {
+  min-height: 0;
+  padding: 0;
+}
+
+/* buttons */
+.accent-btn {
+  background: @accent_bg_color;
+  color: @accent_fg_color;
+  font-weight: 700;
+  font-size: 12.5px;
+  border: none;
+  border-radius: 6px;
+  box-shadow: none;
+  padding: 4px 11px;
+  min-height: 0;
+}
+.accent-btn:hover {
+  background: shade(@accent_bg_color, 1.1);
+}
+.advanced-btn.danger label {
+  color: #f38ba8;
+}
+
+/* profile cards */
+.profiles-row {
+  padding: 14px;
+}
+.profile-card {
+  background: none;
+  border: none;
+  box-shadow: none;
+  border-radius: 8px;
+  padding: 4px;
+  min-height: 0;
+}
+.profile-card:hover {
+  background: alpha(@window_fg_color, 0.05);
+}
+.profile-card.active {
+  background: alpha(@accent_bg_color, 0.12);
+}
+.profile-name {
+  font-size: 12px;
+  color: @view_fg_color;
+}
+.color-dot.small {
+  min-width: 16px;
+  min-height: 16px;
+}
+.color-dot {
+  min-width: 18px;
+  min-height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 100%;
+  box-shadow: none;
+}
+.color-dot.sel {
+  box-shadow: 0 0 0 2px shade(@window_bg_color, 1.75),
+              0 0 0 3.5px alpha(@window_fg_color, 0.65);
+}
+.dot-maroon { background: #eba0ac; }
+.dot-red { background: #f38ba8; }
+.dot-peach { background: #fab387; }
+.dot-yellow { background: #f9e2af; }
+.dot-green { background: #a6e3a1; }
+.dot-blue { background: #89b4fa; }
+.dot-lav { background: #b4befe; }
+.dot-mv { background: #cba6f7; }
+.rgb-row label {
+  color: @view_fg_color;
+  font-size: 13px;
+}
+.rgb-row dropdown > button,
+.rgb-mode > button {
+  min-height: 0;
+  padding: 2px 8px;
+  font-size: 12px;
+  background: shade(@window_bg_color, 2.4);
+  border: none;
+  box-shadow: none;
+  border-radius: 6px;
+}
+.rgb-color-btn button {
+  min-height: 0;
+  min-width: 0;
+  padding: 3px;
+  background: none;
+  border: none;
+  box-shadow: none;
+}
+.rgb-color-btn colorswatch,
+.rgb-color-btn colorswatch > overlay {
+  min-width: 26px;
+  min-height: 16px;
+  border-radius: 5px;
+}
+
 /* audio visualizer: bars are drawn with this 'color' */
 .viz {
   color: @accent_color;

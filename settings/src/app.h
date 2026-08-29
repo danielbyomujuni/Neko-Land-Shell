@@ -6,4 +6,7 @@
 GtkWidget *audio_page_new(void);
 void audio_refresh(void);
 void audio_open_advanced(GtkWindow *parent);
-void audio_shutdown(void); // kill the cava child
+void audio_shutdown(void); // kill the cava/parec children
+
+// rgb.c — the RGB lighting page
+GtkWidget *rgb_page_new(void);

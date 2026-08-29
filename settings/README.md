@@ -35,6 +35,42 @@ make
   binary). Includes an icon-tile palette (`.icon-blue`, `.icon-red`, …) for
   future sidebar categories.
 
+**RGB** — lighting control for connected devices, built to the mockup's RGB
+pane: a master "Lighting" card (on/off, effect, colour dots + hex, brightness,
+speed — staged until "Apply to All Devices"), expandable per-device rows
+(caret + live colour square + "type · mode" subtitle + on/off switch,
+revealing effect/colour/brightness controls), and a PROFILES card —
+snapshots of the full state saved to `~/.config/nekoland/rgb-profiles.ini`;
+click a card to apply, thumbnails are gradients of the profile's colours.
+Brightness is implemented by scaling the emitted colour; speed feeds
+providers with a speed control (NZXT). Devices come from pluggable backends declared in
+`src/rgb.h` (`RgbProvider`: list / set_color / set_mode, optional
+set_color_all) and registered in `providers[]` in `src/rgb.c` — adding a
+device family means implementing those hooks and appending one table entry.
+
+Native providers (no external tools, instant): ENE DRAM (SMBus), NZXT hubs +
+Kraken fans (hidraw), Gigabyte Fusion2 Blackwell GPU (raw i2c), ASRock
+Polychrome USB (hidraw), Razer extended-matrix keyboards (feature reports),
+Logitech HID++ 0x8070 mice — every RGB device in this machine is covered
+natively; the OpenRGB CLI fallback only activates for hardware none of them
+claim. The OpenRGB *package* is still wanted for its udev rules (device
+ACLs on hidraw/i2c).
+- `src/rgb_ene.c` — ENE (Aura) DRAM over SMBus (/dev/i2c-*): pointer-write
+  register protocol, probes 0x71/0x73/0x67 on SMBus adapters only, validates
+  via the device-name register, reads back the current mode. Colours are RBG.
+- `src/rgb_hue2.c` — NZXT Hue 2 family over hidraw: legacy 64-byte effect
+  packets (verified against the RGB & Fan Controller 2024, PID 0x2022); model
+  table maps PIDs to channel counts.
+
+Device node access comes from OpenRGB's udev rules (i2c/hidraw ACLs) — keep
+that package or ship equivalent rules.
+
+`src/rgb_openrgb.c` is an *optional* CLI fallback for hardware without native
+code yet (GPU, mice, keyboards, motherboard); used only if `openrgb` is in
+PATH, and it skips devices native providers claimed. Invocations are
+serialized through flock + timeout because concurrent openrgb processes
+deadlock on the hardware. `NEKOLAND_PAGE=<id>` opens the app on a category.
+
 ## Adding a category
 
 `add_category(id, title, glyph, color_class, page)` in main.c wires a sidebar

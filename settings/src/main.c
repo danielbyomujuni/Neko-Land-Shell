@@ -154,9 +154,23 @@ static void activate(AdwApplication *app, gpointer data) {
 
     // categories
     add_category("sound", "Sound", "", "icon-red", audio_page_new());
-    gtk_list_box_select_row(
-        GTK_LIST_BOX(sidebar_list),
-        gtk_list_box_get_row_at_index(GTK_LIST_BOX(sidebar_list), 0));
+    add_category("rgb", "RGB", "󰆋", "icon-purple", rgb_page_new());
+    // initial page: first category, or NEKOLAND_PAGE=<id> override
+    const char *want = g_getenv("NEKOLAND_PAGE");
+    GtkListBoxRow *initial =
+        gtk_list_box_get_row_at_index(GTK_LIST_BOX(sidebar_list), 0);
+    for (int i = 0; want; i++) {
+        GtkListBoxRow *r =
+            gtk_list_box_get_row_at_index(GTK_LIST_BOX(sidebar_list), i);
+        if (!r)
+            break;
+        const char *id = g_object_get_data(G_OBJECT(r), "page-id");
+        if (id && g_str_equal(id, want)) {
+            initial = r;
+            break;
+        }
+    }
+    gtk_list_box_select_row(GTK_LIST_BOX(sidebar_list), initial);
 
     gtk_box_append(GTK_BOX(root), content_stack);
 
