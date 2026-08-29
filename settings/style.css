@@ -1,0 +1,115 @@
+/* macOS System Settings layout, colored by the system (catppuccin) theme.
+   All colors reference the theme's named palette (@window_bg_color etc.),
+   so switching GTK theme/flavor restyles the app automatically. */
+
+* {
+  font-family: "SF Pro Text", "Inter", "Cantarell", sans-serif;
+  font-size: 10.5pt;
+}
+
+window {
+  background: @view_bg_color;
+  color: @window_fg_color;
+}
+
+/* lone close dot (no titlebar), catppuccin mocha red */
+.close-dot {
+  min-width: 12px;
+  min-height: 12px;
+  padding: 0;
+  border: none;
+  border-radius: 100%;
+  box-shadow: none;
+  background: #f38ba8;
+}
+.close-dot:hover {
+  background: shade(#f38ba8, 1.15);
+}
+
+/* ---- sidebar ---- */
+.sidebar {
+  /* the theme flattens sidebar/view to one color; derive the macOS
+     two-tone by lightening the theme background */
+  background: shade(@window_bg_color, 1.75);
+  color: @sidebar_fg_color;
+  padding: 36px 10px 10px 10px; /* top space for the close dot */
+}
+
+.sidebar-search {
+  background: @view_bg_color;
+  border: 1px solid alpha(@window_fg_color, 0.15);
+  border-radius: 8px;
+  min-height: 28px;
+  color: @window_fg_color;
+  caret-color: @window_fg_color;
+  outline: none;
+}
+.sidebar-search:focus-within {
+  border-color: @accent_bg_color;
+  outline: none;
+  box-shadow: none;
+}
+.sidebar-search image,
+.sidebar-search placeholder {
+  color: alpha(@window_fg_color, 0.5);
+}
+
+.sidebar-list {
+  background: transparent;
+}
+.sidebar-list row {
+  border-radius: 7px;
+  padding: 3px 6px;
+  margin: 1px 0;
+  background: transparent;
+}
+.sidebar-list row:selected {
+  background: @accent_bg_color;
+}
+.sidebar-list row:selected label {
+  color: @accent_fg_color;
+}
+.sidebar-list row:hover:not(:selected) {
+  background: alpha(@window_fg_color, 0.07);
+}
+
+.category-row label {
+  font-size: 10pt;
+}
+.category-icon {
+  min-width: 22px;
+  min-height: 22px;
+  border-radius: 6px;
+  background: alpha(@window_fg_color, 0.35);
+}
+.category-icon image {
+  color: @accent_fg_color;
+  -gtk-icon-size: 14px;
+}
+/* icon tile palette (catppuccin mocha) for future categories */
+.icon-blue { background: #89b4fa; }
+.icon-red { background: #f38ba8; }
+.icon-green { background: #a6e3a1; }
+.icon-orange { background: #fab387; }
+.icon-purple { background: #cba6f7; }
+.icon-gray { background: #6c7086; }
+
+separator {
+  background: alpha(@window_fg_color, 0.08);
+  min-width: 1px;
+}
+
+/* ---- content ---- */
+.content {
+  background: @view_bg_color;
+  color: @view_fg_color;
+}
+.empty-icon {
+  color: alpha(@view_fg_color, 0.3);
+  font-family: "JetBrainsMono Nerd Font";
+  font-size: 30pt;
+}
+.empty-label {
+  color: alpha(@view_fg_color, 0.55);
+  font-size: 11pt;
+}
