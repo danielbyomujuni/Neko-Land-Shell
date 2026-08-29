@@ -50,6 +50,9 @@ static gboolean mem_tick(gpointer data) {
 
 // ---- volume (wireplumber) ----
 
+double cur_volume;
+gboolean cur_muted;
+
 static gboolean vol_tick(gpointer data) {
     (void)data;
     char *out = NULL;
@@ -62,6 +65,8 @@ static gboolean vol_tick(gpointer data) {
     sscanf(out, "Volume: %lf", &vol);
     gboolean muted = strstr(out, "MUTED") != NULL;
     g_free(out);
+    cur_volume = vol;
+    cur_muted = muted;
 
     char buf[64];
     if (muted) {
@@ -76,7 +81,12 @@ static gboolean vol_tick(gpointer data) {
         Bar *bar = g_ptr_array_index(bars, i);
         gtk_label_set_text(GTK_LABEL(bar->vol_label), buf);
     }
+    quickset_sync();
     return TRUE;
+}
+
+void volume_refresh(void) {
+    vol_tick(NULL);
 }
 
 // ---- mpris (via playerctl) ----

@@ -107,6 +107,58 @@ window#nekobar {
   min-height: 0;
 }
 
+/* quick settings panel */
+window#quickset {
+  background: none;
+}
+#quickset-box {
+  background: #11111b;
+  border: solid 2px #1e1e2e;
+  border-radius: 12pt;
+  margin: 6pt;
+}
+#qs-header {
+  color: #9399b2;
+  font-size: 7.5pt;
+}
+#qs-mute {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0 2pt;
+  min-width: 0;
+  min-height: 0;
+}
+#qs-mute * { color: #74c7ec; }
+#qs-scale trough {
+  background: #313244;
+  border: none;
+  min-height: 4px;
+}
+#qs-scale highlight {
+  background: #74c7ec;
+  border: none;
+}
+#qs-scale slider {
+  background: #cdd6f4;
+  border: none;
+  box-shadow: none;
+  min-width: 10px;
+  min-height: 10px;
+  margin: -3px;
+}
+.sink-row {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 1pt 4pt;
+  min-height: 0;
+}
+.sink-row label { color: #cdd6f4; }
+.sink-row.active-sink label { color: #89b4fa; }
+.sink-row.sink-unavailable label { color: #585b70; }
+.sink-row:hover { background: #1e1e2e; border-radius: 6pt; }
+
 /* tray menus (dbusmenu popups), like waybar's #tray menu */
 menu {
   background: #1e1e2e;

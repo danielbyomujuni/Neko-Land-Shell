@@ -23,6 +23,12 @@ exec-once = ~/SoftwareDevelopment/Nekoland/shell/nekobar
 - `src/hypr.c` — Hyprland IPC: requests over `.socket.sock`, live events over
   `.socket2.sock` (workspaces + focused window title), title rewrite rules
 - `src/modules.c` — clock, memory, volume (wpctl), mpris (playerctl) timers
+- `src/quickset.c` — quick settings panel (its own layer-shell window; GTK
+  popovers clip on layer surfaces). Volume slider + mute via wpctl, output
+  picker via `pactl --format=json list sinks` / `set-default-sink`; sinks with
+  unplugged ports are grayed out (WirePlumber refuses to switch to them).
+  Opens from left-click on the volume module, or SIGUSR1
+  (`pkill -USR1 nekobar`) for a Hyprland keybind
 - `src/tray.c` — StatusNotifierItem system tray over GDBus. Owns
   org.kde.StatusNotifierWatcher when possible (queues for the name if another
   bar holds it and inherits it when that bar exits). Icons resolve via
@@ -37,8 +43,8 @@ Left: rofi launcher, per-monitor workspace dots (click to switch), mpris pill
 (click play/pause, middle prev, right next), focused window title.
 Center: clock.
 Right: memory, system tray (left-click activate, right-click menu), volume
-(click pavucontrol, scroll to adjust), color picker, screenshot (left full /
-right area), wallpaper (waypaper), power menu.
+(left-click quick settings, right-click pavucontrol, scroll to adjust), color
+picker, screenshot (left full / right area), wallpaper (waypaper), power menu.
 
 Not implemented yet: tooltips, clock calendar popup. Battery/backlight omitted
 (desktop machine).

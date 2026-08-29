@@ -1,5 +1,6 @@
 #include "nekobar.h"
 
+#include <glib-unix.h>
 #include <gtk-layer-shell/gtk-layer-shell.h>
 
 GPtrArray *bars;
@@ -69,8 +70,9 @@ static gboolean vol_scrolled(GtkWidget *w, GdkEventScroll *ev, gpointer data) {
 
 static gboolean vol_pressed(GtkWidget *w, GdkEventButton *ev, gpointer data) {
     (void)w;
-    (void)data;
     if (ev->button == 1)
+        quickset_toggle(data);
+    else if (ev->button == 3)
         spawn_cmd("pavucontrol");
     return TRUE;
 }
@@ -86,6 +88,7 @@ static Bar *bar_new(GdkMonitor *gdk_mon) {
 
     GtkWindow *win = GTK_WINDOW(gtk_window_new(GTK_WINDOW_TOPLEVEL));
     bar->window = win;
+    bar->gdk_monitor = gdk_mon;
     gtk_widget_set_name(GTK_WIDGET(win), "nekobar");
 
     gtk_layer_init_for_window(win);
@@ -172,9 +175,10 @@ static Bar *bar_new(GdkMonitor *gdk_mon) {
     bar->vol_label = gtk_bin_get_child(GTK_BIN(vol_ev));
     gtk_widget_set_name(vol_ev, "pulseaudio");
     gtk_widget_add_events(vol_ev, GDK_SCROLL_MASK);
-    g_signal_connect(vol_ev, "button-press-event", G_CALLBACK(vol_pressed), NULL);
+    g_signal_connect(vol_ev, "button-press-event", G_CALLBACK(vol_pressed), bar);
     g_signal_connect(vol_ev, "scroll-event", G_CALLBACK(vol_scrolled), NULL);
     gtk_box_pack_end(GTK_BOX(box), vol_ev, FALSE, FALSE, 0);
+    quickset_attach(bar, vol_ev);
 
     bar->tray_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
     gtk_widget_set_name(bar->tray_box, "tray");
@@ -208,6 +212,12 @@ static void load_css(void) {
     g_free(exe);
 }
 
+static gboolean on_sigusr1(gpointer data) {
+    (void)data;
+    quickset_toggle_focused();
+    return TRUE;
+}
+
 int main(int argc, char **argv) {
     gtk_init(&argc, &argv);
     load_css();
@@ -225,6 +235,9 @@ int main(int argc, char **argv) {
     hypr_refresh_title();
     tray_init();
     modules_start();
+
+    // e.g. `pkill -USR1 nekobar` from a Hyprland keybind
+    g_unix_signal_add(SIGUSR1, on_sigusr1, NULL);
 
     gtk_main();
     return 0;

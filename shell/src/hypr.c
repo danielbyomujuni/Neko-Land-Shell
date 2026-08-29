@@ -79,6 +79,29 @@ gboolean hypr_monitor_name_at(int x, int y, char *out, gsize outlen) {
     return found;
 }
 
+gboolean hypr_focused_monitor(char *out, gsize outlen) {
+    gboolean found = FALSE;
+    char *json = hypr_request("j/monitors");
+    if (!json)
+        return FALSE;
+    JsonParser *p = json_parser_new();
+    if (json_parser_load_from_data(p, json, -1, NULL)) {
+        JsonArray *arr = json_node_get_array(json_parser_get_root(p));
+        for (guint i = 0; i < json_array_get_length(arr); i++) {
+            JsonObject *m = json_array_get_object_element(arr, i);
+            if (json_object_get_boolean_member(m, "focused")) {
+                g_strlcpy(out, json_object_get_string_member(m, "name"),
+                          outlen);
+                found = TRUE;
+                break;
+            }
+        }
+    }
+    g_object_unref(p);
+    g_free(json);
+    return found;
+}
+
 // ---- workspaces ----
 
 static void ws_clicked(GtkWidget *btn, gpointer data) {
