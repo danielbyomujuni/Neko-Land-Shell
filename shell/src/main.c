@@ -106,7 +106,9 @@ static gboolean frame_draw_cb(GtkWidget *w, cairo_t *cr, gpointer data) {
     double bar_w = 44;
     if (bar->window && gtk_widget_get_realized(GTK_WIDGET(bar->window)))
         bar_w = gtk_widget_get_allocated_width(GTK_WIDGET(bar->window));
-    double hx = bar_w;
+    // the launcher morphs the chrome open: the hole's left edge slides
+    // right as the shell grows out of the sidebar
+    double hx = bar_w + bar->launch_ext * NEKO_LAUNCH_W;
     double hy = FRAME_W;
     double hw = width - hx - FRAME_W;
     double hh = height - 2 * FRAME_W;
@@ -166,6 +168,14 @@ static GtkWidget *frame_new(GdkMonitor *gdk_mon, Bar *bar) {
     return win;
 }
 
+static gboolean launcher_btn_pressed(GtkWidget *w, GdkEventButton *ev,
+                                     gpointer data) {
+    (void)w;
+    if (ev->button == 1)
+        launcher_toggle(data);
+    return TRUE;
+}
+
 static Bar *bar_new(GdkMonitor *gdk_mon) {
     Bar *bar = g_new0(Bar, 1);
 
@@ -208,11 +218,13 @@ static Bar *bar_new(GdkMonitor *gdk_mon) {
     GtkWidget *left = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_box_pack_start(GTK_BOX(box), left, FALSE, FALSE, 0);
 
-    gtk_box_pack_start(GTK_BOX(left),
-                       icon_button("\U000F08C7", "rofi",
-                                   "~/.config/rofi/launchers/type-7/launcher.sh",
-                                   NULL, "pkill -9 rofi"),
-                       FALSE, FALSE, 0);
+    // built-in launcher (launcher.c) instead of rofi
+    GtkWidget *launch_btn = gtk_button_new_with_label("\U000F08C7");
+    gtk_button_set_relief(GTK_BUTTON(launch_btn), GTK_RELIEF_NONE);
+    gtk_widget_set_name(launch_btn, "rofi"); // keep the existing styling
+    g_signal_connect(launch_btn, "button-press-event",
+                     G_CALLBACK(launcher_btn_pressed), bar);
+    gtk_box_pack_start(GTK_BOX(left), launch_btn, FALSE, FALSE, 0);
 
     bar->ws_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_set_name(bar->ws_box, "workspaces");
@@ -273,6 +285,7 @@ static Bar *bar_new(GdkMonitor *gdk_mon) {
     g_signal_connect(vol_ev, "scroll-event", G_CALLBACK(vol_scrolled), NULL);
     gtk_box_pack_end(GTK_BOX(box), vol_ev, FALSE, FALSE, 0);
     quickset_attach(bar, vol_ev);
+    launcher_attach(bar);
 
     bar->tray_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
     gtk_widget_set_name(bar->tray_box, "tray");
@@ -314,6 +327,12 @@ static gboolean on_sigusr1(gpointer data) {
     return TRUE;
 }
 
+static gboolean on_sigusr2(gpointer data) {
+    (void)data;
+    launcher_toggle_focused();
+    return TRUE;
+}
+
 // ---- monitor hotplug ----
 // Bars are per-monitor layer surfaces: when a monitor is destroyed its bar
 // must go with it, and a (re)connected monitor needs a fresh bar.
@@ -321,6 +340,8 @@ static gboolean on_sigusr1(gpointer data) {
 static void bar_free(Bar *bar) {
     if (bar->qs_popover)
         gtk_widget_destroy(bar->qs_popover);
+    if (bar->launcher)
+        gtk_widget_destroy(bar->launcher);
     if (bar->frame)
         gtk_widget_destroy(bar->frame);
     gtk_widget_destroy(GTK_WIDGET(bar->window));
@@ -410,6 +431,7 @@ int main(int argc, char **argv) {
 
     // e.g. `pkill -USR1 nekobar` from a Hyprland keybind
     g_unix_signal_add(SIGUSR1, on_sigusr1, NULL);
+    g_unix_signal_add(SIGUSR2, on_sigusr2, NULL);
 
     gtk_main();
     return 0;

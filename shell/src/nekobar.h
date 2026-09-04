@@ -2,6 +2,9 @@
 
 #include <gtk/gtk.h>
 
+// width of the launcher app-grid extension of the shell chrome
+#define NEKO_LAUNCH_W 316
+
 // One bar instance per monitor.
 typedef struct {
     GtkWindow *window;
@@ -15,6 +18,13 @@ typedef struct {
     GtkWidget *clock_label;
     GtkWidget *mem_label;
     GtkWidget *vol_label;
+    GtkWidget *launcher;        // app-grid panel (launcher.c)
+    GtkWidget *launcher_search;
+    GtkWidget *launcher_flow;
+    double launch_ext;          // 0..1: how far the chrome has morphed open
+    int launch_target;          // 0 = closed, 1 = open
+    guint launch_tick;          // frame-clock tick callback id
+    gint64 launch_last_us;
     GtkWidget *qs_popover;   // quick settings popover
     GtkWidget *qs_scale;
     GtkWidget *qs_mute_label;
@@ -47,6 +57,11 @@ void volume_refresh(void); // re-poll volume now (also syncs quickset)
 void spawn_cmd(const char *shell_cmd);
 extern double cur_volume; // 0..1, last polled
 extern gboolean cur_muted;
+
+// launcher.c — built-in app grid sliding out of the sidebar
+void launcher_attach(Bar *bar);
+void launcher_toggle(Bar *bar);
+void launcher_toggle_focused(void); // SIGUSR2 / keybind entry point
 
 // quickset.c — quick settings popover (volume + output picker)
 void quickset_attach(Bar *bar, GtkWidget *anchor);

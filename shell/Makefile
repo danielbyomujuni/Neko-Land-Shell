@@ -3,7 +3,8 @@ CFLAGS ?= -O2 -Wall -Wextra
 CFLAGS += $(shell pkg-config --cflags $(PKGS))
 LDLIBS = $(shell pkg-config --libs $(PKGS))
 
-SRC = src/main.c src/hypr.c src/modules.c src/tray.c src/quickset.c
+SRC = src/main.c src/hypr.c src/modules.c src/tray.c src/quickset.c \
+      src/launcher.c
 OBJ = $(SRC:.c=.o)
 
 nekobar: $(OBJ)
