@@ -153,7 +153,10 @@ static gboolean viz_draw(GtkWidget *w, cairo_t *cr, gpointer data) {
     TbWin *tw = data;
     double W = gtk_widget_get_allocated_width(w);
     double H = gtk_widget_get_allocated_height(w);
-    double rx = 0, rw = W, ry = 0, rh = H;
+    // full-mode bars stop short of the strip's ends, clear of the
+    // chrome's bevel curves at the corners
+    double inset = NEKO_FRAME_R + 6;
+    double rx = inset, rw = W - 2 * inset, ry = 0, rh = H;
     double e = tw ? tw->pill_ext : 0.0;
     // slab background (cairo, not CSS — CSS paints over this handler):
     // fades out as the strip empties into pill mode
@@ -167,9 +170,9 @@ static gboolean viz_draw(GtkWidget *w, cairo_t *cr, gpointer data) {
                                              &py)) {
             double pw = gtk_widget_get_allocated_width(tw->content);
             double ph = gtk_widget_get_allocated_height(tw->content);
-            rx = px * e;
+            rx = inset + (px - inset) * e;
             ry = py * e;
-            rw = W + (pw - W) * e;
+            rw = (W - 2 * inset) + (pw - (W - 2 * inset)) * e;
             rh = H + (ph - H) * e;
             double cr_r = 13.0 * e;
             cairo_new_sub_path(cr); // rounded clip = the pill card
