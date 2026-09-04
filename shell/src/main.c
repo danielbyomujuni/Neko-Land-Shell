@@ -118,9 +118,12 @@ static gboolean frame_draw_cb(GtkWidget *w, cairo_t *cr, gpointer data) {
     // the launcher morphs the chrome open: the hole's left edge slides
     // right as the shell grows out of the sidebar
     double hx = lip + bar->launch_ext * NEKO_LAUNCH_W;
-    double hy = FRAME_W;
+    // the context toolbar (toolbar.c) claims a strip below the top border:
+    // the hole moves down so windows sit inset beneath it, same as they
+    // sit beside the sidebar
+    double hy = FRAME_W + bar->tb_inset;
     double hw = width - hx - FRAME_W;
-    double hh = height - 2 * FRAME_W;
+    double hh = height - FRAME_W - hy;
 
     cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
     cairo_set_source_rgba(cr, 0, 0, 0, 0);
@@ -146,8 +149,7 @@ static gboolean frame_draw_cb(GtkWidget *w, cairo_t *cr, gpointer data) {
         // extend past the border into the hole's corner radius so the
         // bevel wedges are glass too, not solid chrome (the rim and
         // shadow are stroked back on top afterwards)
-        cairo_rectangle(cr, gx, FRAME_W, gw + FRAME_R,
-                        height - 2 * FRAME_W);
+        cairo_rectangle(cr, gx, hy, gw + FRAME_R, height - FRAME_W - hy);
         cairo_fill(cr);
         cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
         cairo_pattern_t *grad =
@@ -157,15 +159,14 @@ static gboolean frame_draw_cb(GtkWidget *w, cairo_t *cr, gpointer data) {
         cairo_pattern_add_color_stop_rgba(grad, 1, 0x11 / 255.0,
                                           0x11 / 255.0, 0x1B / 255.0, 0.0);
         cairo_set_source(cr, grad);
-        cairo_rectangle(cr, gx, FRAME_W, MIN(70, gw),
-                        height - 2 * FRAME_W);
+        cairo_rectangle(cr, gx, hy, MIN(70, gw), height - FRAME_W - hy);
         cairo_fill(cr);
         cairo_pattern_destroy(grad);
         // tight rim where the glass meets the top/bottom borders
         cairo_set_line_width(cr, 2);
         cairo_set_source_rgb(cr, 0x1E / 255.0, 0x1E / 255.0, 0x2E / 255.0);
-        cairo_move_to(cr, gx, FRAME_W);
-        cairo_line_to(cr, gx + gw + FRAME_R, FRAME_W);
+        cairo_move_to(cr, gx, hy);
+        cairo_line_to(cr, gx + gw + FRAME_R, hy);
         cairo_stroke(cr);
         cairo_move_to(cr, gx, height - FRAME_W);
         cairo_line_to(cr, gx + gw + FRAME_R, height - FRAME_W);
@@ -612,6 +613,7 @@ int main(int argc, char **argv) {
     tray_init();
     modules_start();
     vr_start();
+    toolbar_start();
 
     // e.g. `pkill -USR1 nekobar` from a Hyprland keybind
     g_unix_signal_add(SIGUSR1, on_sigusr1, NULL);

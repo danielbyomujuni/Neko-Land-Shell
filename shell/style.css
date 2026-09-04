@@ -398,3 +398,43 @@ window#osd {
 #vr-btn:hover {
   opacity: 0.6;
 }
+
+/* context toolbar (slides from the top edge) */
+window#toolbar {
+  background: none;
+}
+#toolbar-box {
+  /* opaque slab in the chrome colour; the edge below is the frame's own
+     hole rim + inset shadow (the chrome carves out tb_inset), so the
+     toolbar reads as part of the shell, not a floating bar. No vertical
+     padding: the content box is valign-centred in the fixed-height slab */
+  background: #11111b;
+  border: none;
+  /* the 5px frame border above merges visually with the slab, so centre
+     the content in the FULL visible strip: bottom padding = border width */
+  padding: 0 14px 5px 14px;
+}
+#tb-icon {
+  color: #f38ba8;
+  font-size: 11pt;
+}
+#toolbar-title {
+  font-size: 9pt;
+  color: #cdd6f4;
+  margin-right: 6px;
+}
+#toolbar-box button {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0 5px;
+  min-width: 0;
+  min-height: 0;
+}
+#toolbar-box button label {
+  font-size: 12pt;
+  color: #cdd6f4;
+}
+#toolbar-box button:hover label {
+  color: #89b4fa;
+}

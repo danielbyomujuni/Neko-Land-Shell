@@ -46,6 +46,7 @@ typedef struct {
     gint64 qs_last_us;
     int qs_h;                   // quickset panel height (for the chrome)
     int qs_w;                   // quickset panel width (for the chrome)
+    int tb_inset;            // toolbar strip carved out of the top chrome
     GtkWidget *qs_popover;   // quick settings popover
     GtkWidget *qs_scale;
     GtkWidget *qs_mute_label;
@@ -91,6 +92,9 @@ void osd_volume_show(void);
 // vr.c — SteamVR sidebar widget
 GtkWidget *vr_widget_new(Bar *bar);
 void vr_start(void); // status poll timer
+
+// toolbar.c — context toolbar sliding from the top (YouTube Music etc.)
+void toolbar_start(void);
 
 // quickset.c — quick settings popover (volume + output picker)
 void quickset_attach(Bar *bar, GtkWidget *anchor);
