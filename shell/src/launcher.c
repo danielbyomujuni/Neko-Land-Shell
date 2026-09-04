@@ -31,6 +31,9 @@ static const GtkTargetEntry dnd_target = {
 // slot -> desktop id, shared by every bar's grid
 static GHashTable *grid_map;
 
+// row -> label: a labeled divider line drawn above that grid row
+static GHashTable *divider_map;
+
 static gboolean ctx_menu_open;   // a context menu belongs to the launcher:
                                  // don't treat its grab as losing focus
 static gboolean drag_active;     // a DnD grab also steals focus; ignore
@@ -46,11 +49,15 @@ static gboolean drag_settling(void) {
            g_get_monotonic_time() - drag_end_us < DRAG_GRACE_US;
 }
 
+static gboolean drag_is_divider; // divider drags highlight a row edge,
+                                 // not a landing cell
+
 static void on_drag_begin(GtkWidget *w, GdkDragContext *ctx, gpointer data) {
-    (void)w;
     (void)ctx;
     (void)data;
     drag_active = TRUE;
+    const char *p = g_object_get_data(G_OBJECT(w), "dnd-payload");
+    drag_is_divider = p && g_str_has_prefix(p, "div:");
 }
 
 static void on_drag_end(GtkWidget *w, GdkDragContext *ctx, gpointer data) {
@@ -58,6 +65,7 @@ static void on_drag_end(GtkWidget *w, GdkDragContext *ctx, gpointer data) {
     (void)ctx;
     (void)data;
     drag_active = FALSE;
+    drag_is_divider = FALSE;
     drag_end_us = g_get_monotonic_time();
 }
 
@@ -73,6 +81,8 @@ static void grid_load(void) {
         return;
     grid_map = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
                                      g_free);
+    divider_map = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
+                                        g_free);
     char *path = grid_conf_path();
     GKeyFile *kf = g_key_file_new();
     if (g_key_file_load_from_file(kf, path, 0, NULL)) {
@@ -84,6 +94,13 @@ static void grid_load(void) {
                 g_hash_table_insert(grid_map, GINT_TO_POINTER(i), id);
             else
                 g_free(id);
+        }
+        for (int r = 0; r < GRID_ROWS; r++) {
+            char key[16];
+            g_snprintf(key, sizeof(key), "r%d", r);
+            char *lbl = g_key_file_get_string(kf, "dividers", key, NULL);
+            if (lbl)
+                g_hash_table_insert(divider_map, GINT_TO_POINTER(r), lbl);
         }
     }
     g_key_file_free(kf);
@@ -99,6 +116,12 @@ static void grid_save(void) {
         char key[16];
         g_snprintf(key, sizeof(key), "s%d", GPOINTER_TO_INT(k));
         g_key_file_set_string(kf, "grid", key, v);
+    }
+    g_hash_table_iter_init(&it, divider_map);
+    while (g_hash_table_iter_next(&it, &k, &v)) {
+        char key[16];
+        g_snprintf(key, sizeof(key), "r%d", GPOINTER_TO_INT(k));
+        g_key_file_set_string(kf, "dividers", key, v);
     }
     char *path = grid_conf_path();
     char *dir = g_path_get_dirname(path);
@@ -345,7 +368,8 @@ static void on_app_clicked(GtkWidget *btn, gpointer data) {
 // ---- drag and drop ----
 
 // payloads: "app:<desktop id>" (from the drawer), "slot:<n>" (from grid),
-// or "fold:<slot>|<id>" (an app dragged out of an open folder)
+// "fold:<slot>|<id>" (an app dragged out of an open folder), or
+// "div:<row>" (a row divider being moved)
 
 static void on_drag_get(GtkWidget *w, GdkDragContext *ctx,
                         GtkSelectionData *sel, guint info, guint time,
@@ -362,14 +386,40 @@ static void on_drag_get(GtkWidget *w, GdkDragContext *ctx,
 
 static void grid_rebuild_all(void);
 
+// a dragged divider lands above the hovered slot's whole row — mark the
+// top edge of every cell in that row instead of glowing one cell
+static void row_mark(GtkWidget *cell, gboolean on) {
+    GtkWidget *grid = gtk_widget_get_parent(cell);
+    int row = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(cell), "slot")) /
+              GRID_COLS;
+    GList *kids = gtk_container_get_children(GTK_CONTAINER(grid));
+    for (GList *l = kids; l; l = l->next) {
+        GtkWidget *w = l->data;
+        if (!GTK_IS_BUTTON(w)) // skip divider event boxes
+            continue;
+        int s = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(w), "slot"));
+        if (s / GRID_COLS != row)
+            continue;
+        GtkStyleContext *sc = gtk_widget_get_style_context(w);
+        if (on)
+            gtk_style_context_add_class(sc, "drop-divider");
+        else
+            gtk_style_context_remove_class(sc, "drop-divider");
+    }
+    g_list_free(kids);
+}
+
 // while a drag hovers a slot, mark it so the CSS can glow the landing spot
 static gboolean on_slot_motion(GtkWidget *w, GdkDragContext *ctx, gint x,
                                gint y, guint time, gpointer data) {
     (void)x;
     (void)y;
     (void)data;
-    gtk_style_context_add_class(gtk_widget_get_style_context(w),
-                                "drop-target");
+    if (drag_is_divider)
+        row_mark(w, TRUE);
+    else
+        gtk_style_context_add_class(gtk_widget_get_style_context(w),
+                                    "drop-target");
     gdk_drag_status(ctx, gdk_drag_context_get_suggested_action(ctx), time);
     return TRUE;
 }
@@ -379,6 +429,7 @@ static void on_slot_leave(GtkWidget *w, GdkDragContext *ctx, guint time,
     (void)ctx;
     (void)time;
     (void)data;
+    row_mark(w, FALSE);
     gtk_style_context_remove_class(gtk_widget_get_style_context(w),
                                    "drop-target");
 }
@@ -405,6 +456,18 @@ static void on_slot_drop(GtkWidget *w, GdkDragContext *ctx, gint x, gint y,
             if (sep && from != slot) {
                 folder_slot_remove(from, sep + 1);
                 slot_place_app(slot, sep + 1);
+                ok = TRUE;
+            }
+        } else if (g_str_has_prefix(payload, "div:")) {
+            int from = atoi(payload + 4);
+            int to = slot / GRID_COLS; // divider lands above this row
+            if (to != from &&
+                g_hash_table_contains(divider_map, GINT_TO_POINTER(from)) &&
+                !g_hash_table_contains(divider_map, GINT_TO_POINTER(to))) {
+                char *lbl = g_strdup(g_hash_table_lookup(
+                    divider_map, GINT_TO_POINTER(from)));
+                g_hash_table_remove(divider_map, GINT_TO_POINTER(from));
+                g_hash_table_insert(divider_map, GINT_TO_POINTER(to), lbl);
                 ok = TRUE;
             }
         } else if (g_str_has_prefix(payload, "slot:")) {
@@ -436,6 +499,7 @@ static void on_slot_drop(GtkWidget *w, GdkDragContext *ctx, gint x, gint y,
         }
         g_free(payload);
     }
+    row_mark(w, FALSE);
     gtk_style_context_remove_class(gtk_widget_get_style_context(w),
                                    "drop-target");
     gtk_drag_finish(ctx, ok, FALSE, time);
@@ -505,6 +569,149 @@ static void menu_pin_cb(GtkMenuItem *item, gpointer data) {
     }
 }
 
+// ---- row dividers (segment the grid: games / IDEs / …) ----
+
+static void menu_divider_add_cb(GtkMenuItem *item, gpointer data) {
+    (void)item;
+    g_hash_table_insert(divider_map, data, g_strdup(""));
+    grid_save();
+    grid_rebuild_all();
+}
+
+static void menu_divider_remove_cb(GtkMenuItem *item, gpointer data) {
+    (void)item;
+    if (g_hash_table_remove(divider_map, data)) {
+        grid_save();
+        grid_rebuild_all();
+    }
+}
+
+// "Add/Remove divider above" for the row a slot belongs to
+static void menu_append_divider_items(GtkWidget *menu, int slot) {
+    int row = slot / GRID_COLS;
+    GtkWidget *item;
+    if (g_hash_table_contains(divider_map, GINT_TO_POINTER(row))) {
+        item = gtk_menu_item_new_with_label("Remove divider above");
+        g_signal_connect(item, "activate",
+                         G_CALLBACK(menu_divider_remove_cb),
+                         GINT_TO_POINTER(row));
+    } else {
+        item = gtk_menu_item_new_with_label("Add divider above");
+        g_signal_connect(item, "activate",
+                         G_CALLBACK(menu_divider_add_cb),
+                         GINT_TO_POINTER(row));
+    }
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+}
+
+static void divider_commit(GtkWidget *entry) {
+    int row = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(entry), "div-row"));
+    if (!g_hash_table_contains(divider_map, GINT_TO_POINTER(row)))
+        return;
+    const char *cur = g_hash_table_lookup(divider_map, GINT_TO_POINTER(row));
+    const char *txt = gtk_entry_get_text(GTK_ENTRY(entry));
+    if (!g_str_equal(cur ? cur : "", txt)) {
+        g_hash_table_insert(divider_map, GINT_TO_POINTER(row),
+                            g_strdup(txt));
+        grid_save();
+    }
+}
+
+static void on_divider_activate(GtkEntry *entry, gpointer data) {
+    (void)data;
+    divider_commit(GTK_WIDGET(entry));
+}
+
+static gboolean on_divider_focus_out(GtkWidget *entry, GdkEventFocus *ev,
+                                     gpointer data) {
+    (void)ev;
+    (void)data;
+    divider_commit(entry);
+    return FALSE;
+}
+
+static gboolean on_divider_press(GtkWidget *w, GdkEventButton *ev,
+                                 gpointer data) {
+    (void)data;
+    if (ev->button != 3)
+        return FALSE;
+    int row = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(w), "div-row"));
+    GtkWidget *menu = gtk_menu_new();
+    GtkWidget *item = gtk_menu_item_new_with_label("Remove divider");
+    g_signal_connect(item, "activate", G_CALLBACK(menu_divider_remove_cb),
+                     GINT_TO_POINTER(row));
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+    g_signal_connect(menu, "deactivate", G_CALLBACK(on_menu_deactivate),
+                     NULL);
+    ctx_menu_open = TRUE;
+    gtk_widget_show_all(menu);
+    gtk_menu_popup_at_pointer(GTK_MENU(menu), (GdkEvent *)ev);
+    return TRUE;
+}
+
+// line — editable label — line, spanning the grid's width; the line part
+// drags (payload "div:<row>") to move the divider to another row
+static GtkWidget *divider_new(int row) {
+    GtkWidget *h = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_widget_set_name(h, "grid-divider");
+    GtkWidget *left = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_widget_set_valign(left, GTK_ALIGN_CENTER);
+    GtkWidget *entry = gtk_entry_new();
+    gtk_widget_set_name(entry, "divider-label");
+    const char *lbl = g_hash_table_lookup(divider_map, GINT_TO_POINTER(row));
+    gtk_entry_set_text(GTK_ENTRY(entry), lbl ? lbl : "");
+    gtk_entry_set_placeholder_text(GTK_ENTRY(entry), "label");
+    gtk_entry_set_has_frame(GTK_ENTRY(entry), FALSE);
+    gtk_entry_set_alignment(GTK_ENTRY(entry), 0.5);
+    gtk_entry_set_width_chars(GTK_ENTRY(entry), 8);
+    g_object_set_data(G_OBJECT(entry), "div-row", GINT_TO_POINTER(row));
+    g_signal_connect(entry, "activate", G_CALLBACK(on_divider_activate),
+                     NULL);
+    g_signal_connect(entry, "focus-out-event",
+                     G_CALLBACK(on_divider_focus_out), NULL);
+    g_signal_connect(entry, "button-press-event",
+                     G_CALLBACK(on_divider_press), NULL);
+    GtkWidget *right = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_widget_set_valign(right, GTK_ALIGN_CENTER);
+    gtk_box_pack_start(GTK_BOX(h), left, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(h), entry, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(h), right, TRUE, TRUE, 0);
+
+    // event box catches presses the entry doesn't (i.e. on the lines):
+    // left-drag moves the divider, right-click offers removal
+    GtkWidget *eb = gtk_event_box_new();
+    gtk_event_box_set_visible_window(GTK_EVENT_BOX(eb), FALSE);
+    gtk_container_add(GTK_CONTAINER(eb), h);
+    g_object_set_data(G_OBJECT(eb), "div-row", GINT_TO_POINTER(row));
+    char *payload = g_strdup_printf("div:%d", row);
+    g_object_set_data_full(G_OBJECT(eb), "dnd-payload", payload, g_free);
+    gtk_drag_source_set(eb, GDK_BUTTON1_MASK, &dnd_target, 1,
+                        GDK_ACTION_MOVE);
+    g_signal_connect(eb, "drag-data-get", G_CALLBACK(on_drag_get), NULL);
+    g_signal_connect(eb, "drag-begin", G_CALLBACK(on_drag_begin), NULL);
+    g_signal_connect(eb, "drag-end", G_CALLBACK(on_drag_end), NULL);
+    g_signal_connect(eb, "button-press-event", G_CALLBACK(on_divider_press),
+                     NULL);
+    return eb;
+}
+
+// empty slots only get a menu for divider management
+static gboolean on_empty_press(GtkWidget *w, GdkEventButton *ev,
+                               gpointer data) {
+    (void)data;
+    if (ev->button != 3)
+        return FALSE;
+    int slot = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(w), "slot"));
+    GtkWidget *menu = gtk_menu_new();
+    menu_append_divider_items(menu, slot);
+    g_signal_connect(menu, "deactivate", G_CALLBACK(on_menu_deactivate),
+                     NULL);
+    ctx_menu_open = TRUE;
+    gtk_widget_show_all(menu);
+    gtk_menu_popup_at_pointer(GTK_MENU(menu), (GdkEvent *)ev);
+    return TRUE;
+}
+
 static GtkWidget *menu_item_ctx(GtkWidget *menu, const char *label,
                                 GCallback cb, Bar *bar, GAppInfo *info) {
     GtkWidget *item = gtk_menu_item_new_with_label(label);
@@ -549,6 +756,7 @@ static void app_menu_popup(Bar *bar, GAppInfo *info, int slot,
         g_signal_connect(item, "activate", G_CALLBACK(menu_unpin_cb),
                          GINT_TO_POINTER(slot));
         gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+        menu_append_divider_items(menu, slot);
     } else {
         const char *id = g_app_info_get_id(info);
         gboolean pinned = id && grid_contains_app(id), full = TRUE;
@@ -920,6 +1128,7 @@ static void folder_menu_popup(Bar *bar, int slot,
     g_signal_connect(item, "activate", G_CALLBACK(menu_unpin_cb),
                      GINT_TO_POINTER(slot));
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+    menu_append_divider_items(menu, slot);
 
     g_signal_connect(menu, "deactivate", G_CALLBACK(on_menu_deactivate),
                      NULL);
@@ -949,7 +1158,15 @@ static void grid_rebuild(Bar *bar) {
     g_list_free(kids);
 
     GHashTable *apps = apps_by_id();
+    int extra = 0; // grid rows taken up by dividers so far
     for (int slot = 0; slot < GRID_SLOTS; slot++) {
+        int row = slot / GRID_COLS, col = slot % GRID_COLS;
+        if (col == 0 &&
+            g_hash_table_contains(divider_map, GINT_TO_POINTER(row))) {
+            gtk_grid_attach(GTK_GRID(bar->launcher_grid), divider_new(row),
+                            0, row + extra, GRID_COLS, 1);
+            extra++;
+        }
         const char *id = g_hash_table_lookup(grid_map, GINT_TO_POINTER(slot));
         GAppInfo *info =
             (id && !is_folder(id)) ? g_hash_table_lookup(apps, id) : NULL;
@@ -1007,6 +1224,8 @@ static void grid_rebuild(Bar *bar) {
                              G_CALLBACK(on_slot_press), c);
         } else {
             gtk_widget_set_name(btn, "slot-empty");
+            g_signal_connect(btn, "button-press-event",
+                             G_CALLBACK(on_empty_press), NULL);
         }
         // every slot accepts drops; highlight is ours, not GTK's box
         gtk_drag_dest_set(btn, GTK_DEST_DEFAULT_DROP, &dnd_target, 1,
@@ -1018,8 +1237,8 @@ static void grid_rebuild(Bar *bar) {
         g_signal_connect(btn, "drag-data-received",
                          G_CALLBACK(on_slot_drop), NULL);
 
-        gtk_grid_attach(GTK_GRID(bar->launcher_grid), btn,
-                        slot % GRID_COLS, slot / GRID_COLS, 1, 1);
+        gtk_grid_attach(GTK_GRID(bar->launcher_grid), btn, col, row + extra,
+                        1, 1);
     }
     g_hash_table_destroy(apps);
     gtk_widget_show_all(bar->launcher_grid);
@@ -1107,7 +1326,7 @@ static void on_handle_drop(GtkWidget *w, GdkDragContext *ctx, gint x,
     const guchar *raw = gtk_selection_data_get_data(sel);
     int len = gtk_selection_data_get_length(sel);
     gboolean ok = FALSE;
-    if (raw && len > 5) {
+    if (raw && len > 4) {
         char *payload = g_strndup((const char *)raw, len);
         if (g_str_has_prefix(payload, "slot:")) { // unpin
             ok = g_hash_table_remove(grid_map,
@@ -1118,6 +1337,9 @@ static void on_handle_drop(GtkWidget *w, GdkDragContext *ctx, gint x,
                 folder_slot_remove(atoi(payload + 5), sep + 1);
                 ok = TRUE;
             }
+        } else if (g_str_has_prefix(payload, "div:")) { // delete divider
+            ok = g_hash_table_remove(divider_map,
+                                     GINT_TO_POINTER(atoi(payload + 4)));
         }
         g_free(payload);
     }
