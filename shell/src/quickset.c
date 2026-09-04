@@ -45,7 +45,7 @@ static gboolean volcap_draw(GtkWidget *w, cairo_t *cr, gpointer data) {
                                         : "\U000F057E";
     PangoLayout *pl = gtk_widget_create_pango_layout(w, icon);
     PangoFontDescription *fd =
-        pango_font_description_from_string("JetBrainsMono Nerd Font 11");
+        pango_font_description_from_string("JetBrainsMono Nerd Font 9");
     pango_layout_set_font_description(pl, fd);
     pango_font_description_free(fd);
     int iw, ih;
@@ -57,7 +57,7 @@ static gboolean volcap_draw(GtkWidget *w, cairo_t *cr, gpointer data) {
     else
         cairo_set_source_rgba(cr, 0xCD / 255.0, 0xD6 / 255.0, 0xF4 / 255.0,
                               0.8);
-    cairo_move_to(cr, 16, (H - ih) / 2);
+    cairo_move_to(cr, 12, (H - ih) / 2);
     pango_cairo_show_layout(cr, pl);
     g_object_unref(pl);
     return TRUE;
@@ -468,7 +468,7 @@ void quickset_attach(Bar *bar, GtkWidget *anchor) {
     // the event box's input window must sit above it
     gtk_event_box_set_above_child(GTK_EVENT_BOX(bar->qs_scale), TRUE);
     GtkWidget *volarea = gtk_drawing_area_new();
-    gtk_widget_set_size_request(volarea, 220, 36);
+    gtk_widget_set_size_request(volarea, 220, 26);
     g_signal_connect(volarea, "draw", G_CALLBACK(volcap_draw), NULL);
     gtk_container_add(GTK_CONTAINER(bar->qs_scale), volarea);
     gtk_widget_add_events(bar->qs_scale, GDK_BUTTON_PRESS_MASK |
@@ -491,7 +491,7 @@ void quickset_attach(Bar *bar, GtkWidget *anchor) {
     GtkWidget *outbtn = gtk_button_new_with_label("\U000F02CB");
     gtk_button_set_relief(GTK_BUTTON(outbtn), GTK_RELIEF_NONE);
     gtk_widget_set_name(outbtn, "qs-out-btn");
-    gtk_widget_set_size_request(outbtn, 36, 36);
+    gtk_widget_set_size_request(outbtn, 30, 30);
     gtk_widget_set_valign(outbtn, GTK_ALIGN_CENTER);
     g_signal_connect(outbtn, "clicked", G_CALLBACK(on_out_btn), bar);
     gtk_box_pack_start(GTK_BOX(volrow), outbtn, FALSE, FALSE, 0);

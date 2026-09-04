@@ -144,6 +144,66 @@ static gboolean mpris_tick(gpointer data) {
     return TRUE;
 }
 
+// ---- event-driven volume: pactl subscribe pushes sink changes ----
+// (the poll below stays only as a slow fallback; without this, roller /
+// keybind changes took up to 2s to show in the capsule)
+
+static void pactl_subscribe_start(void);
+
+static gboolean pactl_retry(gpointer data) {
+    (void)data;
+    pactl_subscribe_start();
+    return G_SOURCE_REMOVE;
+}
+
+static guint vol_refresh_pending;
+
+static gboolean vol_refresh_now(gpointer data) {
+    (void)data;
+    vol_refresh_pending = 0;
+    volume_refresh();
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean pactl_event(GIOChannel *ch, GIOCondition cond,
+                            gpointer data) {
+    (void)cond;
+    (void)data;
+    char *line = NULL;
+    gsize len = 0;
+    GIOStatus st;
+    gboolean dirty = FALSE;
+    while ((st = g_io_channel_read_line(ch, &line, &len, NULL, NULL)) ==
+           G_IO_STATUS_NORMAL) {
+        if (strstr(line, "sink") || strstr(line, "server"))
+            dirty = TRUE;
+        g_free(line);
+        line = NULL;
+    }
+    g_free(line);
+    if (dirty && !vol_refresh_pending) // debounce event bursts
+        vol_refresh_pending = g_timeout_add(50, vol_refresh_now, NULL);
+    if (st == G_IO_STATUS_EOF) { // pipewire restarted: reconnect
+        g_timeout_add_seconds(5, pactl_retry, NULL);
+        return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+static void pactl_subscribe_start(void) {
+    char *argv[] = {"pactl", "subscribe", NULL};
+    gint out_fd = -1;
+    if (!g_spawn_async_with_pipes(NULL, argv, NULL, G_SPAWN_SEARCH_PATH,
+                                  NULL, NULL, NULL, NULL, &out_fd, NULL,
+                                  NULL)) {
+        g_timeout_add_seconds(5, pactl_retry, NULL);
+        return;
+    }
+    GIOChannel *ch = g_io_channel_unix_new(out_fd);
+    g_io_channel_set_flags(ch, G_IO_FLAG_NONBLOCK, NULL);
+    g_io_add_watch(ch, G_IO_IN | G_IO_HUP, pactl_event, NULL);
+}
+
 void modules_start(void) {
     clock_tick(NULL);
     mem_tick(NULL);
@@ -151,6 +211,7 @@ void modules_start(void) {
     mpris_tick(NULL);
     g_timeout_add_seconds(5, clock_tick, NULL);
     g_timeout_add_seconds(30, mem_tick, NULL);
-    g_timeout_add_seconds(2, vol_tick, NULL);
+    g_timeout_add_seconds(15, vol_tick, NULL); // slow fallback only
+    pactl_subscribe_start();
     g_timeout_add_seconds(2, mpris_tick, NULL);
 }
