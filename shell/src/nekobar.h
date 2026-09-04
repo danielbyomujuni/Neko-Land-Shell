@@ -33,8 +33,12 @@ void hypr_refresh_title(void);
 gboolean hypr_monitor_name_at(int x, int y, char *out, gsize outlen);
 gboolean hypr_focused_monitor(char *out, gsize outlen);
 
+// main.c — re-resolve hyprland names for all bars (layout changes)
+void bars_refresh_names(void);
+
 // tray.c — StatusNotifierItem system tray
 void tray_init(void);
+void tray_refresh(void); // repopulate tray boxes (e.g. after a bar is added)
 
 // modules.c — timers for clock / memory / volume / mpris
 void modules_start(void);

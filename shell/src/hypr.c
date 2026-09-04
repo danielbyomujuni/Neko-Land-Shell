@@ -281,6 +281,37 @@ void hypr_refresh_title(void) {
 
 // ---- event socket ----
 
+// Debounced heal after monitors come and go. On a (re)added monitor the
+// split-monitor-workspaces build in use maps it WRONG incrementally (it
+// stole another monitor's range in testing), but its full remap — run on
+// config reload, with monitor_priority pinning ranges by name — restores
+// the exact original layout. So: reload to remap, then pull windows
+// stranded on unmapped workspaces back in, then refresh the bars.
+static guint heal_timer;
+static gboolean heal_needs_remap;
+
+static gboolean heal_cb(gpointer data) {
+    (void)data;
+    heal_timer = 0;
+    if (heal_needs_remap) {
+        heal_needs_remap = FALSE;
+        char *reply = hypr_request("reload");
+        g_free(reply);
+    }
+    bars_refresh_names();
+    hypr_dispatch("split-grabroguewindows");
+    hypr_refresh_workspaces();
+    hypr_refresh_title();
+    return G_SOURCE_REMOVE;
+}
+
+static void schedule_heal(gboolean remap) {
+    heal_needs_remap |= remap;
+    if (heal_timer)
+        g_source_remove(heal_timer);
+    heal_timer = g_timeout_add(1500, heal_cb, NULL);
+}
+
 static gboolean on_event(GIOChannel *ch, GIOCondition cond, gpointer data) {
     (void)cond;
     (void)data;
@@ -301,6 +332,10 @@ static gboolean on_event(GIOChannel *ch, GIOCondition cond, gpointer data) {
             g_str_has_prefix(line, "focusedmon") ||
             g_str_has_prefix(line, "closewindow"))
             title_dirty = TRUE;
+        if (g_str_has_prefix(line, "monitoradded"))
+            schedule_heal(TRUE); // re-added monitors need the full remap
+        else if (g_str_has_prefix(line, "monitorremoved"))
+            schedule_heal(FALSE);
         g_free(line);
         line = NULL;
     }

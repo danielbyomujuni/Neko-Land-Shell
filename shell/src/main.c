@@ -218,6 +218,75 @@ static gboolean on_sigusr1(gpointer data) {
     return TRUE;
 }
 
+// ---- monitor hotplug ----
+// Bars are per-monitor layer surfaces: when a monitor is destroyed its bar
+// must go with it, and a (re)connected monitor needs a fresh bar.
+
+static void bar_free(Bar *bar) {
+    if (bar->qs_popover)
+        gtk_widget_destroy(bar->qs_popover);
+    gtk_widget_destroy(GTK_WIDGET(bar->window));
+    g_free(bar);
+}
+
+// re-resolve each bar's hyprland monitor name (layout may have changed)
+void bars_refresh_names(void) {
+    for (guint i = 0; i < bars->len; i++) {
+        Bar *bar = g_ptr_array_index(bars, i);
+        GdkRectangle geo;
+        gdk_monitor_get_geometry(bar->gdk_monitor, &geo);
+        hypr_monitor_name_at(geo.x, geo.y, bar->hypr_name,
+                             sizeof(bar->hypr_name));
+    }
+}
+
+static gboolean add_bar_delayed(gpointer data) {
+    GdkMonitor *mon = data;
+    // the monitor may have vanished again during the delay
+    GdkDisplay *display = gdk_display_get_default();
+    gboolean still_here = FALSE;
+    for (int i = 0; i < gdk_display_get_n_monitors(display); i++)
+        still_here |= gdk_display_get_monitor(display, i) == mon;
+    gboolean have_bar = FALSE;
+    for (guint i = 0; i < bars->len; i++)
+        have_bar |=
+            ((Bar *)g_ptr_array_index(bars, i))->gdk_monitor == mon;
+    if (still_here && !have_bar) {
+        g_ptr_array_add(bars, bar_new(mon));
+        bars_refresh_names();
+        hypr_refresh_workspaces();
+        hypr_refresh_title();
+        tray_refresh();
+        volume_refresh();
+    }
+    g_object_unref(mon);
+    return G_SOURCE_REMOVE;
+}
+
+static void on_monitor_added(GdkDisplay *display, GdkMonitor *mon,
+                             gpointer data) {
+    (void)display;
+    (void)data;
+    // give hyprland a moment to register the monitor (name resolution and
+    // the split-workspaces plugin's mapping both need it settled)
+    g_timeout_add(700, add_bar_delayed, g_object_ref(mon));
+}
+
+static void on_monitor_removed(GdkDisplay *display, GdkMonitor *mon,
+                               gpointer data) {
+    (void)display;
+    (void)data;
+    for (guint i = 0; i < bars->len; i++) {
+        Bar *bar = g_ptr_array_index(bars, i);
+        if (bar->gdk_monitor == mon) {
+            g_ptr_array_remove_index(bars, i);
+            bar_free(bar);
+            break;
+        }
+    }
+    hypr_refresh_workspaces();
+}
+
 int main(int argc, char **argv) {
     gtk_init(&argc, &argv);
     load_css();
@@ -229,6 +298,11 @@ int main(int argc, char **argv) {
         GdkMonitor *mon = gdk_display_get_monitor(display, i);
         g_ptr_array_add(bars, bar_new(mon));
     }
+
+    g_signal_connect(display, "monitor-added",
+                     G_CALLBACK(on_monitor_added), NULL);
+    g_signal_connect(display, "monitor-removed",
+                     G_CALLBACK(on_monitor_removed), NULL);
 
     hypr_init();
     hypr_refresh_workspaces();

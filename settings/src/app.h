@@ -10,3 +10,6 @@ void audio_shutdown(void); // kill the cava/parec children
 
 // rgb.c — the RGB lighting page
 GtkWidget *rgb_page_new(void);
+
+// displays.c — monitors via hyprctl + Lua config
+GtkWidget *displays_page_new(void);

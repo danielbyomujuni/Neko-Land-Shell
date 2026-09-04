@@ -164,6 +164,8 @@ static int lcd_read_orientation(int fd) {
     return info[0x1A] & 0x03;
 }
 
+// gdk_pixbuf_scale_simple/rotate_simple come from gdk-pixbuf, not GTK, so
+// this file also links into the windowless nekoland-lcdd daemon
 // scales to 240×240, pre-rotates for the mounted orientation and packs
 // RGB565 big-endianish the way the panel wants it
 static guint8 *lcd_pack_pixbuf(GdkPixbuf *src, int orientation,

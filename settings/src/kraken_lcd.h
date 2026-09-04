@@ -11,7 +11,7 @@
 
 #pragma once
 
-#include <gtk/gtk.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
 
 gboolean kraken_lcd_present(void);
 

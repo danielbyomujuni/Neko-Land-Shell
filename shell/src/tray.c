@@ -518,3 +518,6 @@ void tray_init(void) {
                    on_host_acquired, NULL, NULL, NULL);
     g_free(host);
 }
+
+// repopulate every bar's tray box (bars can come and go with monitors)
+void tray_refresh(void) { rebuild_trays(); }

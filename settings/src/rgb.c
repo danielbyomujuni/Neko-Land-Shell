@@ -578,11 +578,48 @@ static void lcd_note(const char *msg) {
     gtk_label_set_text(GTK_LABEL(status_label), msg);
 }
 
+// persist the LCD choice so nekoland-lcdd --restore can reapply it at login
+static void lcd_conf_save(const char *mode, const char *path) {
+    char *dir = g_build_filename(g_get_user_config_dir(), "nekoland", NULL);
+    g_mkdir_with_parents(dir, 0755);
+    char *file = g_build_filename(dir, "lcd.conf", NULL);
+    GKeyFile *kf = g_key_file_new();
+    g_key_file_load_from_file(kf, file, 0, NULL); // keep other keys
+    if (mode)
+        g_key_file_set_string(kf, "lcd", "mode", mode);
+    if (path)
+        g_key_file_set_string(kf, "lcd", "path", path);
+    if (lcd_brightness >= 0)
+        g_key_file_set_integer(kf, "lcd", "brightness", lcd_brightness);
+    if (lcd_orientation >= 0)
+        g_key_file_set_integer(kf, "lcd", "rotation", lcd_orientation);
+    g_key_file_save_to_file(kf, file, NULL);
+    g_key_file_free(kf);
+    g_free(file);
+    g_free(dir);
+}
+
+// content is shown by the detached nekoland-lcdd daemon so it outlives the
+// settings app; each spawn replaces the previous instance (pidfile)
+static gboolean lcd_daemon_spawn(const char *arg) {
+    char *self = g_file_read_link("/proc/self/exe", NULL);
+    char *dir = self ? g_path_get_dirname(self) : g_strdup(".");
+    char *exe = g_build_filename(dir, "nekoland-lcdd", NULL);
+    const char *argv[] = {exe, arg, NULL};
+    gboolean ok = g_spawn_async(NULL, (char **)argv, NULL, G_SPAWN_DEFAULT,
+                                NULL, NULL, NULL, NULL);
+    g_free(exe);
+    g_free(dir);
+    g_free(self);
+    return ok;
+}
+
 static gboolean lcd_bright_commit(gpointer data) {
     (void)data;
     lcd_bright_timer = 0;
     kraken_lcd_set_brightness(lcd_bright_pending);
     lcd_brightness = lcd_bright_pending;
+    lcd_conf_save(NULL, NULL);
     return G_SOURCE_REMOVE;
 }
 
@@ -605,13 +642,15 @@ static void on_lcd_orientation(GObject *dd, GParamSpec *spec, gpointer data) {
     guint sel = gtk_drop_down_get_selected(GTK_DROP_DOWN(dd));
     lcd_orientation = (int)sel * 90;
     kraken_lcd_set_orientation(lcd_orientation);
+    lcd_conf_save(NULL, NULL);
 }
 
 static void on_lcd_liquid(GtkWidget *btn, gpointer data) {
     (void)btn;
     (void)data;
-    lcd_note(kraken_lcd_set_liquid() ? "LCD: liquid temperature"
-                                     : "LCD: switch failed");
+    lcd_conf_save("liquid", NULL);
+    lcd_note(lcd_daemon_spawn("--liquid") ? "LCD: liquid temperature"
+                                          : "LCD: daemon launch failed");
 }
 
 static void on_lcd_file_done(GObject *src, GAsyncResult *res, gpointer data) {
@@ -623,22 +662,17 @@ static void on_lcd_file_done(GObject *src, GAsyncResult *res, gpointer data) {
     g_object_unref(f);
     if (!path)
         return;
-    GError *err = NULL;
-    // handles both stills and animations (animations are streamed)
-    if (kraken_lcd_anim_start(path, &err)) {
+    lcd_conf_save("file", path);
+    // the daemon streams animations on its own so they outlive the app
+    if (lcd_daemon_spawn(path)) {
         char *base = g_path_get_basename(path);
         char buf[160];
-        g_snprintf(buf, sizeof(buf), "LCD: showing %s%s", base,
-                   kraken_lcd_anim_active() ? " (animated)" : "");
+        g_snprintf(buf, sizeof(buf), "LCD: showing %s", base);
         lcd_note(buf);
         g_free(base);
     } else {
-        char buf[160];
-        g_snprintf(buf, sizeof(buf), "LCD: %s",
-                   err ? err->message : "upload failed");
-        lcd_note(buf);
+        lcd_note("LCD: daemon launch failed");
     }
-    g_clear_error(&err);
     g_free(path);
 }
 
