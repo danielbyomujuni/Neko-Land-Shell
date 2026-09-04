@@ -18,7 +18,10 @@
 #include <string.h>
 
 #define TB_GRACE_S 8 // keep the bar this long after a pause
-#define TB_H 32      // slab height; also carved out of the frame chrome
+#define TB_H 32 // slab height
+// chrome carve: slab + a hair so the hole rim clears the slab and
+// reads as the toolbar's bottom border (one line, not two)
+#define TB_INSET (TB_H + 2)
 
 // the YouTube Music provider shows on EVERY monitor (its exception —
 // follow-the-focused-monitor stays the default for future providers),
@@ -446,8 +449,11 @@ static TbWin *tb_win_new(Bar *bar) {
     gtk_layer_set_keyboard_mode(GTK_WINDOW(tw->win),
                                 GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
     // reserve the strip: windows tile below the toolbar, exactly like
-    // they tile beside the sidebar
-    gtk_layer_auto_exclusive_zone_enable(GTK_WINDOW(tw->win));
+    // they tile beside the sidebar. The compositor adds the top margin
+    // to the zone, so subtract it — otherwise the top window gap ends
+    // up 5px wider than the other edges
+    gtk_layer_set_exclusive_zone(GTK_WINDOW(tw->win),
+                                 TB_H - NEKO_FRAME_W);
 
     GdkScreen *screen = gtk_widget_get_screen(tw->win);
     GdkVisual *rgba = gdk_screen_get_rgba_visual(screen);
@@ -793,8 +799,8 @@ static void tw_set_shown(TbWin *tw, gboolean on) {
         // the content row exists whenever some audio drives the bar
         gtk_widget_set_visible(tw->content, music_on || mon_on);
         tw_refresh_content(tw);
-        if (tw->bar->tb_inset != TB_H) {
-            tw->bar->tb_inset = TB_H;
+        if (tw->bar->tb_inset != TB_INSET) {
+            tw->bar->tb_inset = TB_INSET;
             gtk_widget_queue_draw(tw->bar->frame);
         }
         tw_kick_anim(tw);
