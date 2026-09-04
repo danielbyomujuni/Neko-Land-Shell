@@ -221,6 +221,53 @@ void quickset_sync(void) {
 // so the panel is its own surface anchored below the bar's right edge (the
 // bar's exclusive zone pushes it down automatically).
 
+// concave glass fillets where the panel's rims tee into the sidebar and
+// the bottom border — drawn on THIS surface so the frost matches the
+// panel glass exactly (blur is per-surface)
+static gboolean qs_draw_bg(GtkWidget *w, cairo_t *cr, gpointer data) {
+    (void)data;
+    double H = gtk_widget_get_allocated_height(w);
+    double r = NEKO_FRAME_R;
+    double px = NEKO_LAUNCH_W; // panel's right edge in surface coords
+
+    cairo_set_source_rgba(cr, 0x11 / 255.0, 0x11 / 255.0, 0x1B / 255.0,
+                          0.45);
+    // top-left tee: wedge between the sidebar wall and the top rim
+    cairo_move_to(cr, 0, 0);
+    cairo_arc_negative(cr, r, 0, r, G_PI, G_PI / 2);
+    cairo_line_to(cr, 0, r);
+    cairo_close_path(cr);
+    cairo_fill(cr);
+    // bottom-right tee: wedge between the right rim and the bottom border
+    cairo_move_to(cr, px, H - r);
+    cairo_arc_negative(cr, px + r, H - r, r, G_PI, G_PI / 2);
+    cairo_line_to(cr, px, H);
+    cairo_close_path(cr);
+    cairo_fill(cr);
+
+    // rim strokes along the fillet arcs
+    cairo_set_line_width(cr, 2);
+    cairo_set_source_rgb(cr, 0x1E / 255.0, 0x1E / 255.0, 0x2E / 255.0);
+    cairo_new_path(cr);
+    cairo_arc_negative(cr, r, 0, r, G_PI, G_PI / 2);
+    cairo_stroke(cr);
+    cairo_new_path(cr);
+    cairo_arc_negative(cr, px + r, H - r, r, G_PI, G_PI / 2);
+    cairo_stroke(cr);
+    return FALSE;
+}
+
+// the chrome's corner morph needs the panel's real height
+static void qs_frame_sized(GtkWidget *w, GdkRectangle *alloc,
+                           gpointer data) {
+    (void)w;
+    Bar *bar = data;
+    if (bar->qs_h != alloc->height) {
+        bar->qs_h = alloc->height;
+        gtk_widget_queue_draw(bar->frame);
+    }
+}
+
 void quickset_attach(Bar *bar, GtkWidget *anchor) {
     (void)anchor;
     GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
@@ -231,9 +278,14 @@ void quickset_attach(Bar *bar, GtkWidget *anchor) {
     gtk_layer_set_layer(GTK_WINDOW(win), GTK_LAYER_SHELL_LAYER_TOP);
     gtk_layer_set_namespace(GTK_WINDOW(win), "nekobar-quickset");
     gtk_layer_set_monitor(GTK_WINDOW(win), bar->gdk_monitor);
+    // bottom-left corner card, flush against the sidebar and bottom
+    // border — same glass language as the app launcher
     gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_BOTTOM, TRUE);
     gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
-    gtk_layer_set_margin(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_BOTTOM, 60);
+    gtk_layer_set_margin(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_LEFT,
+                         NEKO_FRAME_W);
+    gtk_layer_set_margin(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_BOTTOM,
+                         NEKO_FRAME_W);
 
     GdkScreen *screen = gtk_widget_get_screen(win);
     GdkVisual *rgba = gdk_screen_get_rgba_visual(screen);
@@ -243,7 +295,23 @@ void quickset_attach(Bar *bar, GtkWidget *anchor) {
 
     GtkWidget *frame = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_set_name(frame, "quickset-box");
-    gtk_container_add(GTK_CONTAINER(win), frame);
+    gtk_widget_set_size_request(frame, NEKO_LAUNCH_W, -1);
+    g_signal_connect(frame, "size-allocate", G_CALLBACK(qs_frame_sized),
+                     bar);
+
+    // spacers extend the surface over the bevel wedge areas
+    GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    GtkWidget *top_sp = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_size_request(top_sp, -1, NEKO_FRAME_R);
+    gtk_box_pack_start(GTK_BOX(outer), top_sp, FALSE, FALSE, 0);
+    GtkWidget *bevel_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    GtkWidget *right_sp = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_size_request(right_sp, NEKO_FRAME_R, -1);
+    gtk_box_pack_start(GTK_BOX(bevel_row), frame, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(bevel_row), right_sp, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(outer), bevel_row, TRUE, TRUE, 0);
+    g_signal_connect(win, "draw", G_CALLBACK(qs_draw_bg), bar);
+    gtk_container_add(GTK_CONTAINER(win), outer);
 
     GtkWidget *v = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_container_set_border_width(GTK_CONTAINER(v), 12);
@@ -280,15 +348,51 @@ void quickset_attach(Bar *bar, GtkWidget *anchor) {
     gtk_box_pack_start(GTK_BOX(v), bar->qs_sink_box, FALSE, FALSE, 0);
 }
 
+static gboolean qs_tick_cb(GtkWidget *w, GdkFrameClock *clock,
+                           gpointer data) {
+    (void)w;
+    Bar *bar = data;
+    gint64 now = gdk_frame_clock_get_frame_time(clock);
+    double dt = CLAMP((now - bar->qs_last_us) / 1e6, 0.0, 0.05);
+    bar->qs_last_us = now;
+    double target = bar->qs_target;
+    bar->qs_ext += (target - bar->qs_ext) * MIN(1.0, 14.0 * dt);
+    if (ABS(target - bar->qs_ext) < 0.004)
+        bar->qs_ext = target;
+    gtk_widget_queue_draw(bar->frame);
+    if (bar->qs_popover)
+        gtk_widget_set_opacity(bar->qs_popover,
+                               bar->qs_ext * bar->qs_ext);
+    if (bar->qs_ext == target) {
+        if (target == 0 && bar->qs_popover)
+            gtk_widget_hide(bar->qs_popover);
+        bar->qs_tick = 0;
+        return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+static void qs_animate(Bar *bar, int target) {
+    bar->qs_target = target;
+    if (!bar->qs_tick) {
+        GdkFrameClock *clock = gtk_widget_get_frame_clock(bar->frame);
+        bar->qs_last_us = clock ? gdk_frame_clock_get_frame_time(clock) : 0;
+        bar->qs_tick =
+            gtk_widget_add_tick_callback(bar->frame, qs_tick_cb, bar, NULL);
+    }
+}
+
 void quickset_toggle(Bar *bar) {
     if (!bar->qs_popover)
         return;
-    if (gtk_widget_get_visible(bar->qs_popover)) {
-        gtk_widget_hide(bar->qs_popover);
+    if (bar->qs_target == 1) {
+        qs_animate(bar, 0); // chrome retracts, panel fades
     } else {
         rebuild_sinks(bar);
         quickset_sync();
+        gtk_widget_set_opacity(bar->qs_popover, 0.0);
         gtk_widget_show_all(bar->qs_popover);
+        qs_animate(bar, 1);
     }
 }
 

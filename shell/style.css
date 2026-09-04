@@ -24,11 +24,8 @@ window#nekobar {
 
 /* flat icon buttons */
 #rofi,
-#color-picker,
-#screenshot,
-#wallpaper,
 #power,
-#pulseaudio {
+#quickset-btn {
   background: none;
   border: none;
   box-shadow: none;
@@ -115,10 +112,13 @@ window#quickset {
   background: none;
 }
 #quickset-box {
-  background: #11111b;
-  border: solid 2px #1e1e2e;
-  border-radius: 12pt;
-  margin: 6pt;
+  /* glass, matching the launcher panel (layerrule blur + ignore_alpha);
+     the rim is drawn by the shell chrome (frame corner morph), not CSS */
+  background: rgba(17, 17, 27, 0.45);
+  border: none;
+  border-radius: 0 14px 0 0;
+  margin: 0;
+  padding: 4pt;
 }
 #qs-header {
   color: #9399b2;
@@ -174,36 +174,18 @@ menu check {
   margin-right: 4pt;
 }
 
-#pulseaudio {
+#quickset-btn {
   margin-bottom: 10pt;
 }
-#pulseaudio * { color: #74c7ec; }
-
-#color-picker {
-  margin-bottom: 10pt;
-}
-#color-picker * { font-size: 9pt; }
-
-#screenshot {
-  margin-bottom: 10pt;
-}
-#screenshot * { font-size: 10pt; }
-
-#wallpaper {
-  margin-bottom: 10pt;
-}
-#wallpaper * { font-size: 10.5pt; }
+#quickset-btn * { color: #74c7ec; font-size: 10pt; }
 
 #power {
   margin-bottom: 7pt;
 }
 #power * { font-size: 10pt; }
 
-#wallpaper:hover,
-#screenshot:hover,
-#color-picker:hover,
 #power:hover,
-#pulseaudio:hover,
+#quickset-btn:hover,
 #rofi:hover {
   opacity: 0.6;
 }

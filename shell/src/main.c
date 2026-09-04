@@ -170,6 +170,37 @@ static gboolean frame_draw_cb(GtkWidget *w, cairo_t *cr, gpointer data) {
         cairo_stroke(cr);
         cairo_restore(cr);
     }
+    // quickset corner morph: the chrome grows a glass corner out of the
+    // sidebar at the bottom (same language as the launcher panel)
+    if (bar->qs_ext > 0.001) {
+        double qw = bar->qs_ext * NEKO_LAUNCH_W;
+        double qh = bar->qs_h > 0 ? bar->qs_h : 150;
+        double qx = lip;
+        double qy = height - FRAME_W - qh;
+        cairo_save(cr);
+        // gradient melting the opaque sidebar into the corner glass
+        cairo_pattern_t *grad =
+            cairo_pattern_create_linear(qx, 0, qx + 70, 0);
+        cairo_pattern_add_color_stop_rgba(grad, 0, 0x11 / 255.0,
+                                          0x11 / 255.0, 0x1B / 255.0, 1.0);
+        cairo_pattern_add_color_stop_rgba(grad, 1, 0x11 / 255.0,
+                                          0x11 / 255.0, 0x1B / 255.0, 0.0);
+        cairo_set_source(cr, grad);
+        cairo_rectangle(cr, qx, qy, MIN(70, qw), qh);
+        cairo_fill(cr);
+        cairo_pattern_destroy(grad);
+        // rim along the corner's top and right edges, rounded where they
+        // meet — grows with the morph
+        double r = MIN(FRAME_R, qw);
+        cairo_move_to(cr, qx, qy);
+        cairo_line_to(cr, qx + qw - r, qy);
+        cairo_arc(cr, qx + qw - r, qy + r, r, -G_PI / 2, 0);
+        cairo_line_to(cr, qx + qw, height - FRAME_W);
+        cairo_set_line_width(cr, 2);
+        cairo_set_source_rgb(cr, 0x1E / 255.0, 0x1E / 255.0, 0x2E / 255.0);
+        cairo_stroke(cr);
+        cairo_restore(cr);
+    }
     // rim line around the hole
     rounded_path_lr(cr, hx, hy, hw, hh, hole_rl, FRAME_R);
     cairo_set_line_width(cr, 2);
@@ -356,27 +387,11 @@ static Bar *bar_new(GdkMonitor *gdk_mon) {
                                  NULL, NULL),
                      FALSE, FALSE, 0);
     gtk_box_pack_end(GTK_BOX(box), bar->clock_label, FALSE, FALSE, 0);
-    gtk_box_pack_end(GTK_BOX(box),
-                     icon_button("\U000F0E09", "wallpaper", "waypaper",
-                                 "waypaper --random", NULL),
-                     FALSE, FALSE, 0);
-    gtk_box_pack_end(
-        GTK_BOX(box),
-        icon_button("", "screenshot",
-                    "~/.config/waybar/scripts/screenshot_full.sh",
-                    "~/.config/waybar/scripts/screenshot_area.sh", NULL),
-        FALSE, FALSE, 0);
-    gtk_box_pack_end(
-        GTK_BOX(box),
-        icon_button("", "color-picker",
-                    "hyprpicker -an && notify-send 'Colour copied to clipboard'",
-                    NULL, NULL),
-        FALSE, FALSE, 0);
-
-    GtkWidget *vol_ev = gtk_button_new_with_label("");
+    // quick settings button (click: panel, scroll: volume)
+    GtkWidget *vol_ev = gtk_button_new_with_label("\U000F0493");
     gtk_button_set_relief(GTK_BUTTON(vol_ev), GTK_RELIEF_NONE);
     bar->vol_label = gtk_bin_get_child(GTK_BIN(vol_ev));
-    gtk_widget_set_name(vol_ev, "pulseaudio");
+    gtk_widget_set_name(vol_ev, "quickset-btn");
     gtk_widget_add_events(vol_ev, GDK_SCROLL_MASK);
     g_signal_connect(vol_ev, "button-press-event", G_CALLBACK(vol_pressed), bar);
     g_signal_connect(vol_ev, "scroll-event", G_CALLBACK(vol_scrolled), NULL);

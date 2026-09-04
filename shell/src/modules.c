@@ -71,21 +71,13 @@ static gboolean vol_tick(gpointer data) {
     cur_volume = vol;
     cur_muted = muted;
 
-    char buf[64];
-    if (muted) {
-        g_strlcpy(buf, " \U000F075F ", sizeof(buf));
-    } else {
-        const char *icon = vol < 0.34   ? "\U000F057F"
-                           : vol < 0.67 ? "\U000F0580"
-                                        : "\U000F057E";
-        // sidebar: icon only, the percentage lives in the tooltip/quickset
-        g_strlcpy(buf, icon, sizeof(buf));
-    }
-    char tip[32];
-    g_snprintf(tip, sizeof(tip), "%d%%", (int)(vol * 100 + 0.5));
+    // the button shows a fixed quick-settings glyph; volume state lives
+    // in the tooltip and the quickset panel
+    char tip[48];
+    g_snprintf(tip, sizeof(tip), muted ? "muted" : "volume %d%%",
+               (int)(vol * 100 + 0.5));
     for (guint i = 0; i < bars->len; i++) {
         Bar *bar = g_ptr_array_index(bars, i);
-        gtk_label_set_text(GTK_LABEL(bar->vol_label), buf);
         gtk_widget_set_tooltip_text(bar->vol_label, tip);
     }
     quickset_sync();

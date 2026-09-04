@@ -34,10 +34,11 @@ typedef struct {
     int launch_target;          // 0 = closed, 1 = open
     guint launch_tick;          // frame-clock tick callback id
     gint64 launch_last_us;
-    double drawer_ext;          // 0..1: how far the drawer glass has opened
-    int drawer_target;
-    guint drawer_tick;
-    gint64 drawer_last_us;
+    double qs_ext;              // 0..1: quickset corner morph progress
+    int qs_target;
+    guint qs_tick;
+    gint64 qs_last_us;
+    int qs_h;                   // quickset panel height (for the chrome)
     GtkWidget *qs_popover;   // quick settings popover
     GtkWidget *qs_scale;
     GtkWidget *qs_mute_label;
