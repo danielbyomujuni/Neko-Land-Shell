@@ -6,6 +6,10 @@
 #define NEKO_LAUNCH_W 316
 // height of the glassy all-apps drawer at the panel's bottom
 #define NEKO_DRAWER_H 600
+// thickness of the shell's screen-edge border
+#define NEKO_FRAME_W 5
+// corner radius of the shell's cutouts
+#define NEKO_FRAME_R 14
 
 // One bar instance per monitor.
 typedef struct {

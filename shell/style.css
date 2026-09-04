@@ -258,10 +258,10 @@ window#launcher {
 }
 #drawer-handle:hover { color: #cdd6f4; }
 #drawer-box {
-  /* solid layer riding on the glass panel */
+  /* solid card floating on the glass panel */
   background: #181825;
-  border-top: solid 2px #1e1e2e;
-  border-radius: 12pt 12pt 0 0;
+  border: solid 2px #1e1e2e;
+  border-radius: 12pt;
   padding: 8pt;
 }
 #slot-empty {

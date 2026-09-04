@@ -84,31 +84,38 @@ static gboolean vol_pressed(GtkWidget *w, GdkEventButton *ev, gpointer data) {
 // the shell and the windows. The sidebar draws its content transparently
 // on top of this slab, so the two are one connected piece.
 
-#define FRAME_W 5.0
-#define FRAME_R 14.0
+#define FRAME_W ((double)NEKO_FRAME_W)
+#define FRAME_R ((double)NEKO_FRAME_R)
 
-static void rounded_path(cairo_t *cr, double x, double y, double w, double h,
-                         double r) {
+// separate left/right corner radii: the hole's left corners straighten
+// while the launcher glass is open so the seam has no bevel wedges
+static void rounded_path_lr(cairo_t *cr, double x, double y, double w,
+                            double h, double rl, double rr) {
+    rl = MAX(rl, 0.5);
+    rr = MAX(rr, 0.5);
     cairo_new_sub_path(cr);
-    cairo_arc(cr, x + w - r, y + r, r, -G_PI / 2, 0);
-    cairo_arc(cr, x + w - r, y + h - r, r, 0, G_PI / 2);
-    cairo_arc(cr, x + r, y + h - r, r, G_PI / 2, G_PI);
-    cairo_arc(cr, x + r, y + r, r, G_PI, 3 * G_PI / 2);
+    cairo_arc(cr, x + w - rr, y + rr, rr, -G_PI / 2, 0);
+    cairo_arc(cr, x + w - rr, y + h - rr, rr, 0, G_PI / 2);
+    cairo_arc(cr, x + rl, y + h - rl, rl, G_PI / 2, G_PI);
+    cairo_arc(cr, x + rl, y + rl, rl, G_PI, 3 * G_PI / 2);
     cairo_close_path(cr);
 }
+
 
 static gboolean frame_draw_cb(GtkWidget *w, cairo_t *cr, gpointer data) {
     Bar *bar = data;
     double width = gtk_widget_get_allocated_width(w);
     double height = gtk_widget_get_allocated_height(w);
-    // the hole starts at the sidebar's right edge; elsewhere the border
-    // is a thin FRAME_W strip along the screen edge
+    // the hole starts a FRAME_W lip after the sidebar's right edge, so
+    // the visible margin to the windows matches the other borders;
+    // elsewhere the border is a thin FRAME_W strip along the screen edge
     double bar_w = 44;
     if (bar->window && gtk_widget_get_realized(GTK_WIDGET(bar->window)))
         bar_w = gtk_widget_get_allocated_width(GTK_WIDGET(bar->window));
+    double lip = bar_w + FRAME_W;
     // the launcher morphs the chrome open: the hole's left edge slides
     // right as the shell grows out of the sidebar
-    double hx = bar_w + bar->launch_ext * NEKO_LAUNCH_W;
+    double hx = lip + bar->launch_ext * NEKO_LAUNCH_W;
     double hy = FRAME_W;
     double hw = width - hx - FRAME_W;
     double hh = height - 2 * FRAME_W;
@@ -117,21 +124,28 @@ static gboolean frame_draw_cb(GtkWidget *w, cairo_t *cr, gpointer data) {
     cairo_set_source_rgba(cr, 0, 0, 0, 0);
     cairo_paint(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+    // the hole keeps its rounded corners on all sides — the launcher's
+    // right border shares the same bevel language as the rest of the shell
+    double hole_rl = FRAME_R;
     cairo_set_fill_rule(cr, CAIRO_FILL_RULE_EVEN_ODD);
     cairo_rectangle(cr, 0, 0, width, height);
-    rounded_path(cr, hx, hy, hw, hh, FRAME_R);
+    rounded_path_lr(cr, hx, hy, hw, hh, hole_rl, FRAME_R);
     cairo_set_source_rgb(cr, 0x11 / 255.0, 0x11 / 255.0, 0x1B / 255.0);
     cairo_fill(cr);
     // glassy launcher panel: the slab opens up behind the whole panel so
     // the compositor blur shows the desktop through the grid, with a
     // short horizontal gradient melting the opaque sidebar into glass
     if (bar->launch_ext > 0.001) {
-        double gx = bar_w;
+        double gx = lip;
         double gw = bar->launch_ext * NEKO_LAUNCH_W;
         cairo_save(cr);
         cairo_set_fill_rule(cr, CAIRO_FILL_RULE_WINDING);
         cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
-        cairo_rectangle(cr, gx, FRAME_W, gw, height - 2 * FRAME_W);
+        // extend past the border into the hole's corner radius so the
+        // bevel wedges are glass too, not solid chrome (the rim and
+        // shadow are stroked back on top afterwards)
+        cairo_rectangle(cr, gx, FRAME_W, gw + FRAME_R,
+                        height - 2 * FRAME_W);
         cairo_fill(cr);
         cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
         cairo_pattern_t *grad =
@@ -145,17 +159,26 @@ static gboolean frame_draw_cb(GtkWidget *w, cairo_t *cr, gpointer data) {
                         height - 2 * FRAME_W);
         cairo_fill(cr);
         cairo_pattern_destroy(grad);
+        // tight rim where the glass meets the top/bottom borders
+        cairo_set_line_width(cr, 2);
+        cairo_set_source_rgb(cr, 0x1E / 255.0, 0x1E / 255.0, 0x2E / 255.0);
+        cairo_move_to(cr, gx, FRAME_W);
+        cairo_line_to(cr, gx + gw + FRAME_R, FRAME_W);
+        cairo_stroke(cr);
+        cairo_move_to(cr, gx, height - FRAME_W);
+        cairo_line_to(cr, gx + gw + FRAME_R, height - FRAME_W);
+        cairo_stroke(cr);
         cairo_restore(cr);
     }
     // rim line around the hole
-    rounded_path(cr, hx, hy, hw, hh, FRAME_R);
+    rounded_path_lr(cr, hx, hy, hw, hh, hole_rl, FRAME_R);
     cairo_set_line_width(cr, 2);
     cairo_set_source_rgb(cr, 0x1E / 255.0, 0x1E / 255.0, 0x2E / 255.0);
     cairo_stroke(cr);
     // soft inner shadow just inside the hole: the inset depth cue
     for (int i = 1; i <= 4; i++) {
-        rounded_path(cr, hx + i, hy + i, hw - 2 * i, hh - 2 * i,
-                     MAX(FRAME_R - i, 1));
+        rounded_path_lr(cr, hx + i, hy + i, hw - 2 * i, hh - 2 * i,
+                        MAX(hole_rl - i, 0.5), MAX(FRAME_R - i, 1));
         cairo_set_line_width(cr, 1.2);
         cairo_set_source_rgba(cr, 0, 0, 0, 0.16 - 0.035 * i);
         cairo_stroke(cr);

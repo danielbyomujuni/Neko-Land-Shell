@@ -731,6 +731,27 @@ static void drawer_populate(Bar *bar) {
 
 // ---- panel ----
 
+// the bevel wedges beyond the panel's right border are tinted HERE, on the
+// same surface as the panel glass, so hyprland's blur treats them
+// identically and the frost matches exactly
+static gboolean launcher_draw_bg(GtkWidget *w, cairo_t *cr, gpointer data) {
+    (void)data;
+    double h = gtk_widget_get_allocated_height(w);
+    double x = NEKO_LAUNCH_W;
+    double r = NEKO_FRAME_R;
+    cairo_set_source_rgba(cr, 0x11 / 255.0, 0x11 / 255.0, 0x1B / 255.0,
+                          0.45);
+    cairo_move_to(cr, x, 0);
+    cairo_arc(cr, x + r, r, r, G_PI, 3 * G_PI / 2);
+    cairo_close_path(cr);
+    cairo_fill(cr);
+    cairo_move_to(cr, x, h);
+    cairo_arc_negative(cr, x + r, h - r, r, G_PI, G_PI / 2);
+    cairo_close_path(cr);
+    cairo_fill(cr);
+    return FALSE; // children (panel, catcher) draw as usual
+}
+
 void launcher_attach(Bar *bar) {
     grid_load();
 
@@ -748,6 +769,11 @@ void launcher_attach(Bar *bar) {
     gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_RIGHT, TRUE);
     gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_TOP, TRUE);
     gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_BOTTOM, TRUE);
+    // tuck the glass inside the shell's top/bottom borders
+    gtk_layer_set_margin(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_TOP,
+                         NEKO_FRAME_W);
+    gtk_layer_set_margin(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_BOTTOM,
+                         NEKO_FRAME_W);
     gtk_layer_set_keyboard_mode(GTK_WINDOW(win),
                                 GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND);
 
@@ -817,6 +843,9 @@ void launcher_attach(Bar *bar) {
     GtkWidget *drawer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_set_name(drawer, "drawer-box");
     gtk_widget_set_size_request(drawer, -1, DRAWER_H);
+    gtk_widget_set_margin_start(drawer, 4);
+    gtk_widget_set_margin_end(drawer, 4);
+    gtk_widget_set_margin_bottom(drawer, 8);
 
     bar->launcher_search = gtk_search_entry_new();
     gtk_widget_set_name(bar->launcher_search, "launcher-search");
@@ -849,6 +878,7 @@ void launcher_attach(Bar *bar) {
 
     g_signal_connect(win, "key-press-event", G_CALLBACK(on_key), bar);
     g_signal_connect(win, "focus-out-event", G_CALLBACK(on_focus_out), bar);
+    g_signal_connect(win, "draw", G_CALLBACK(launcher_draw_bg), NULL);
 }
 
 static gboolean drawer_test_open(gpointer data) {
@@ -866,8 +896,10 @@ void launcher_toggle(Bar *bar) {
     // the click that just auto-closed it shouldn't immediately reopen it
     if (g_get_monotonic_time() - last_autoclose_us < 400000)
         return;
+    // exclusive zone offsets past the sidebar; add the shell's lip so
+    // the glass tint spans exactly to its right border
     gtk_layer_set_margin(GTK_WINDOW(bar->launcher),
-                         GTK_LAYER_SHELL_EDGE_LEFT, 0);
+                         GTK_LAYER_SHELL_EDGE_LEFT, NEKO_FRAME_W);
     grid_rebuild(bar);
     drawer_populate(bar);
     gtk_widget_set_opacity(bar->launcher, 0.0);
