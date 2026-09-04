@@ -332,6 +332,12 @@ static gboolean on_event(GIOChannel *ch, GIOCondition cond, gpointer data) {
             g_str_has_prefix(line, "focusedmon") ||
             g_str_has_prefix(line, "closewindow"))
             title_dirty = TRUE;
+        // a real window took focus, or the mouse left the monitor:
+        // the launcher lost focus
+        if ((g_str_has_prefix(line, "activewindow>>") && line[14] &&
+             line[14] != ',') ||
+            g_str_has_prefix(line, "focusedmon"))
+            launcher_autoclose();
         if (g_str_has_prefix(line, "monitoradded"))
             schedule_heal(TRUE); // re-added monitors need the full remap
         else if (g_str_has_prefix(line, "monitorremoved"))

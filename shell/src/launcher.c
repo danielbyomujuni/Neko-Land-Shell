@@ -30,6 +30,11 @@ static const GtkTargetEntry dnd_target = {
 // slot -> desktop id, shared by every bar's grid
 static GHashTable *grid_map;
 
+static gboolean ctx_menu_open;   // a context menu belongs to the launcher:
+                                 // don't treat its grab as losing focus
+static gint64 last_autoclose_us; // guards the toggle button against
+                                 // close-then-reopen on the same click
+
 // ---- persistence ----
 
 static char *grid_conf_path(void) {
@@ -287,6 +292,7 @@ static gboolean menu_destroy_idle(gpointer menu) {
 
 static void on_menu_deactivate(GtkWidget *menu, gpointer data) {
     (void)data; // destroy after the activate handler has run
+    ctx_menu_open = FALSE;
     g_idle_add(menu_destroy_idle, menu);
 }
 
@@ -396,6 +402,7 @@ static void app_menu_popup(Bar *bar, GAppInfo *info, int slot,
 
     g_signal_connect(menu, "deactivate", G_CALLBACK(on_menu_deactivate),
                      NULL);
+    ctx_menu_open = TRUE;
     gtk_widget_show_all(menu);
     gtk_menu_popup_at_pointer(GTK_MENU(menu), (GdkEvent *)ev);
 }
@@ -588,6 +595,40 @@ static void on_handle_clicked(GtkWidget *btn, gpointer data) {
                              GTK_REVEALER(bar->launcher_drawer)));
 }
 
+// clicking the empty area beside the panel closes it
+static gboolean launcher_click_off(Bar *bar) {
+    last_autoclose_us = g_get_monotonic_time();
+    launcher_hide(bar);
+    return TRUE;
+}
+
+// close when the surface loses keyboard focus (click on a window, the
+// wallpaper, another monitor…) — unless one of our own menus took it
+static gboolean on_focus_out(GtkWidget *w, GdkEventFocus *ev,
+                             gpointer data) {
+    (void)w;
+    (void)ev;
+    Bar *bar = data;
+    if (!ctx_menu_open && launcher_visible(bar)) {
+        last_autoclose_us = g_get_monotonic_time();
+        launcher_hide(bar);
+    }
+    return FALSE;
+}
+
+// backstop for keyboard focus changes (alt-tab etc.), driven from hypr.c
+void launcher_autoclose(void) {
+    if (ctx_menu_open)
+        return;
+    for (guint i = 0; i < bars->len; i++) {
+        Bar *bar = g_ptr_array_index(bars, i);
+        if (launcher_visible(bar)) {
+            last_autoclose_us = g_get_monotonic_time();
+            launcher_hide(bar);
+        }
+    }
+}
+
 static gboolean on_key(GtkWidget *w, GdkEventKey *ev, gpointer data) {
     (void)w;
     Bar *bar = data;
@@ -701,7 +742,10 @@ void launcher_attach(Bar *bar) {
     gtk_layer_set_layer(GTK_WINDOW(win), GTK_LAYER_SHELL_LAYER_TOP);
     gtk_layer_set_namespace(GTK_WINDOW(win), "nekobar-launcher");
     gtk_layer_set_monitor(GTK_WINDOW(win), bar->gdk_monitor);
+    // span the whole monitor: the panel sits left, the rest is a
+    // transparent click-catcher so clicking anywhere off closes it
     gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
+    gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_RIGHT, TRUE);
     gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_TOP, TRUE);
     gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_BOTTOM, TRUE);
     gtk_layer_set_keyboard_mode(GTK_WINDOW(win),
@@ -713,10 +757,21 @@ void launcher_attach(Bar *bar) {
         gtk_widget_set_visual(win, rgba);
     gtk_widget_set_app_paintable(win, TRUE);
 
+    GtkWidget *root = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_container_add(GTK_CONTAINER(win), root);
+
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_set_name(box, "launcher-box");
     gtk_widget_set_size_request(box, NEKO_LAUNCH_W, -1);
-    gtk_container_add(GTK_CONTAINER(win), box);
+    gtk_box_pack_start(GTK_BOX(root), box, FALSE, FALSE, 0);
+
+    // transparent input-only area covering the rest of the screen
+    GtkWidget *catcher = gtk_event_box_new();
+    gtk_event_box_set_visible_window(GTK_EVENT_BOX(catcher), FALSE);
+    gtk_widget_set_hexpand(catcher, TRUE);
+    g_signal_connect_swapped(catcher, "button-press-event",
+                             G_CALLBACK(launcher_click_off), bar);
+    gtk_box_pack_start(GTK_BOX(root), catcher, TRUE, TRUE, 0);
 
     GtkWidget *overlay = gtk_overlay_new();
     gtk_widget_set_vexpand(overlay, TRUE);
@@ -793,6 +848,7 @@ void launcher_attach(Bar *bar) {
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), bar->launcher_drawer);
 
     g_signal_connect(win, "key-press-event", G_CALLBACK(on_key), bar);
+    g_signal_connect(win, "focus-out-event", G_CALLBACK(on_focus_out), bar);
 }
 
 static gboolean drawer_test_open(gpointer data) {
@@ -807,6 +863,9 @@ void launcher_toggle(Bar *bar) {
         launcher_hide(bar);
         return;
     }
+    // the click that just auto-closed it shouldn't immediately reopen it
+    if (g_get_monotonic_time() - last_autoclose_us < 400000)
+        return;
     gtk_layer_set_margin(GTK_WINDOW(bar->launcher),
                          GTK_LAYER_SHELL_EDGE_LEFT, 0);
     grid_rebuild(bar);

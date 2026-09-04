@@ -64,6 +64,7 @@ extern gboolean cur_muted;
 void launcher_attach(Bar *bar);
 void launcher_toggle(Bar *bar);
 void launcher_toggle_focused(void); // SIGUSR2 / keybind entry point
+void launcher_autoclose(void); // close open launchers (focus moved away)
 
 // quickset.c — quick settings popover (volume + output picker)
 void quickset_attach(Bar *bar, GtkWidget *anchor);
