@@ -1,6 +1,8 @@
 #include "nekobar.h"
 
 #include <glib-unix.h>
+#include <math.h>
+#include <time.h>
 #include <gtk-layer-shell/gtk-layer-shell.h>
 
 GPtrArray *bars;
@@ -293,6 +295,50 @@ static void center_child(GtkWidget *child, gpointer data) {
     gtk_widget_set_halign(child, GTK_ALIGN_CENTER);
 }
 
+// tiny analog dial for the clock capsule (repainted by clock_tick)
+static gboolean clock_face_draw(GtkWidget *w, cairo_t *cr, gpointer data) {
+    (void)data;
+    double W = gtk_widget_get_allocated_width(w);
+    double H = gtk_widget_get_allocated_height(w);
+    double cx = W / 2, cy = H / 2, r = MIN(W, H) / 2 - 0.5;
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    // face
+    cairo_arc(cr, cx, cy, r, 0, 2 * G_PI);
+    cairo_set_source_rgb(cr, 0x31 / 255.0, 0x32 / 255.0, 0x44 / 255.0);
+    cairo_fill(cr);
+    // quarter-hour tick dots
+    cairo_set_source_rgb(cr, 0x6c / 255.0, 0x70 / 255.0, 0x86 / 255.0);
+    for (int i = 0; i < 4; i++) {
+        double a = i * G_PI / 2;
+        cairo_arc(cr, cx + cos(a) * (r - 1.5), cy + sin(a) * (r - 1.5),
+                  0.8, 0, 2 * G_PI);
+        cairo_fill(cr);
+    }
+    cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+    // hour hand
+    double ha = ((tm.tm_hour % 12) + tm.tm_min / 60.0) / 12.0 * 2 * G_PI -
+                G_PI / 2;
+    cairo_set_line_width(cr, 1.8);
+    cairo_set_source_rgb(cr, 0xf3 / 255.0, 0x8b / 255.0, 0xa8 / 255.0);
+    cairo_move_to(cr, cx, cy);
+    cairo_line_to(cr, cx + cos(ha) * r * 0.48, cy + sin(ha) * r * 0.48);
+    cairo_stroke(cr);
+    // minute hand
+    double ma = tm.tm_min / 60.0 * 2 * G_PI - G_PI / 2;
+    cairo_set_line_width(cr, 1.4);
+    cairo_set_source_rgb(cr, 0x89 / 255.0, 0xb4 / 255.0, 0xfa / 255.0);
+    cairo_move_to(cr, cx, cy);
+    cairo_line_to(cr, cx + cos(ma) * r * 0.76, cy + sin(ma) * r * 0.76);
+    cairo_stroke(cr);
+    // hub
+    cairo_arc(cr, cx, cy, 1.0, 0, 2 * G_PI);
+    cairo_set_source_rgb(cr, 0xcd / 255.0, 0xd6 / 255.0, 0xf4 / 255.0);
+    cairo_fill(cr);
+    return TRUE;
+}
+
 static Bar *bar_new(GdkMonitor *gdk_mon) {
     Bar *bar = g_new0(Bar, 1);
 
@@ -381,13 +427,30 @@ static Bar *bar_new(GdkMonitor *gdk_mon) {
     bar->clock_label = gtk_label_new("");
     gtk_widget_set_name(bar->clock_label, "clock");
     gtk_label_set_justify(GTK_LABEL(bar->clock_label), GTK_JUSTIFY_CENTER);
+    // clock capsule: tiny analog dial above the stacked digits
+    GtkWidget *clockbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
+    gtk_widget_set_name(clockbox, "clock-widget");
+    bar->clock_area = gtk_drawing_area_new();
+    // 14px dial: leaves clear side margins inside the ~21px capsule
+    gtk_widget_set_size_request(bar->clock_area, 14, 14);
+    gtk_widget_set_halign(bar->clock_area, GTK_ALIGN_CENTER);
+    gtk_widget_set_margin_bottom(bar->clock_area, 1);
+    g_signal_connect(bar->clock_area, "draw", G_CALLBACK(clock_face_draw),
+                     NULL);
+    gtk_box_pack_start(GTK_BOX(clockbox), bar->clock_area, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(clockbox), bar->clock_label, FALSE, FALSE,
+                       0);
+    bar->clock_ampm = gtk_label_new("");
+    gtk_widget_set_name(bar->clock_ampm, "clock-ampm");
+    gtk_box_pack_start(GTK_BOX(clockbox), bar->clock_ampm, FALSE, FALSE,
+                       0);
 
     // ---- bottom (packed end: first call sits at the very bottom) ----
     gtk_box_pack_end(GTK_BOX(box),
                      icon_button("", "power", "~/.config/rofi/powermenu.sh",
                                  NULL, NULL),
                      FALSE, FALSE, 0);
-    gtk_box_pack_end(GTK_BOX(box), bar->clock_label, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(box), clockbox, FALSE, FALSE, 0);
     // quick settings button (click: panel, scroll: volume)
     GtkWidget *vol_ev = gtk_button_new_with_label("\U000F0493");
     gtk_button_set_relief(GTK_BUTTON(vol_ev), GTK_RELIEF_NONE);

@@ -17,13 +17,23 @@ static gboolean clock_tick(gpointer data) {
     time_t now = time(NULL);
     struct tm tm;
     localtime_r(&now, &tm);
-    strftime(buf, sizeof(buf), "%H\n%M", &tm);
+    strftime(buf, sizeof(buf), "%I\n%M", &tm);
+    char ampm[8];
+    strftime(ampm, sizeof(ampm), "%p", &tm);
+    for (char *c = ampm; *c; c++)
+        *c = g_ascii_tolower(*c);
     char tip[64];
     strftime(tip, sizeof(tip), "%A %e %B", &tm);
     for (guint i = 0; i < bars->len; i++) {
         Bar *bar = g_ptr_array_index(bars, i);
         gtk_label_set_text(GTK_LABEL(bar->clock_label), buf);
+        if (bar->clock_ampm)
+            gtk_label_set_text(GTK_LABEL(bar->clock_ampm), ampm);
         gtk_widget_set_tooltip_text(bar->clock_label, tip);
+        if (bar->clock_area) { // analog dial follows the same tick
+            gtk_widget_set_tooltip_text(bar->clock_area, tip);
+            gtk_widget_queue_draw(bar->clock_area);
+        }
     }
     return TRUE;
 }

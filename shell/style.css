@@ -190,8 +190,20 @@ menu check {
   opacity: 0.6;
 }
 
-#clock {
+/* clock capsule: analog dial + stacked digits */
+#clock-widget {
+  background: #181825;
+  border: solid 1px #1e1e2e;
+  border-radius: 7pt;
   margin-bottom: 10pt;
+  padding: 4pt 2pt;
+}
+#clock {
+  margin: 0;
+}
+#clock-ampm {
+  font-size: 6pt;
+  color: #9399b2;
 }
 
 /* built-in app launcher panel */

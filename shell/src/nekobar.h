@@ -23,6 +23,8 @@ typedef struct {
     GtkWidget *mpris_label;
     GtkWidget *tray_box;     // system tray icons
     GtkWidget *clock_label;
+    GtkWidget *clock_area;   // analog dial above the digits
+    GtkWidget *clock_ampm;   // small am/pm tag under the digits
     GtkWidget *mem_label;
     GtkWidget *vol_label;
     GtkWidget *launcher;        // app-grid panel (launcher.c)
