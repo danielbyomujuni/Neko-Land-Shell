@@ -83,3 +83,4 @@ void quickset_attach(Bar *bar, GtkWidget *anchor);
 void quickset_toggle(Bar *bar);
 void quickset_toggle_focused(void);
 void quickset_sync(void); // update sliders/mute icons from cur_volume/cur_muted
+void quickset_autoclose(void); // close open panels (focus moved away)

@@ -221,27 +221,34 @@ void quickset_sync(void) {
 // so the panel is its own surface anchored below the bar's right edge (the
 // bar's exclusive zone pushes it down automatically).
 
+static gboolean qs_click_off(Bar *bar); // defined with the morph code
+
 // concave glass fillets where the panel's rims tee into the sidebar and
 // the bottom border — drawn on THIS surface so the frost matches the
 // panel glass exactly (blur is per-surface)
 static gboolean qs_draw_bg(GtkWidget *w, cairo_t *cr, gpointer data) {
     (void)data;
-    double H = gtk_widget_get_allocated_height(w);
+    GtkWidget *box = g_object_get_data(G_OBJECT(w), "qs-box");
+    int fx = 0, fy = 0;
+    if (!box ||
+        !gtk_widget_translate_coordinates(box, w, 0, 0, &fx, &fy))
+        return FALSE;
     double r = NEKO_FRAME_R;
-    double px = NEKO_LAUNCH_W; // panel's right edge in surface coords
+    double px = fx + NEKO_LAUNCH_W; // panel's right edge
+    double bottom = fy + gtk_widget_get_allocated_height(box);
 
     cairo_set_source_rgba(cr, 0x11 / 255.0, 0x11 / 255.0, 0x1B / 255.0,
                           0.45);
     // top-left tee: wedge between the sidebar wall and the top rim
-    cairo_move_to(cr, 0, 0);
-    cairo_arc_negative(cr, r, 0, r, G_PI, G_PI / 2);
-    cairo_line_to(cr, 0, r);
+    cairo_move_to(cr, fx, fy - r);
+    cairo_arc_negative(cr, fx + r, fy - r, r, G_PI, G_PI / 2);
+    cairo_line_to(cr, fx, fy);
     cairo_close_path(cr);
     cairo_fill(cr);
     // bottom-right tee: wedge between the right rim and the bottom border
-    cairo_move_to(cr, px, H - r);
-    cairo_arc_negative(cr, px + r, H - r, r, G_PI, G_PI / 2);
-    cairo_line_to(cr, px, H);
+    cairo_move_to(cr, px, bottom - r);
+    cairo_arc_negative(cr, px + r, bottom - r, r, G_PI, G_PI / 2);
+    cairo_line_to(cr, px, bottom);
     cairo_close_path(cr);
     cairo_fill(cr);
 
@@ -249,10 +256,10 @@ static gboolean qs_draw_bg(GtkWidget *w, cairo_t *cr, gpointer data) {
     cairo_set_line_width(cr, 2);
     cairo_set_source_rgb(cr, 0x1E / 255.0, 0x1E / 255.0, 0x2E / 255.0);
     cairo_new_path(cr);
-    cairo_arc_negative(cr, r, 0, r, G_PI, G_PI / 2);
+    cairo_arc_negative(cr, fx + r, fy - r, r, G_PI, G_PI / 2);
     cairo_stroke(cr);
     cairo_new_path(cr);
-    cairo_arc_negative(cr, px + r, H - r, r, G_PI, G_PI / 2);
+    cairo_arc_negative(cr, px + r, bottom - r, r, G_PI, G_PI / 2);
     cairo_stroke(cr);
     return FALSE;
 }
@@ -280,8 +287,12 @@ void quickset_attach(Bar *bar, GtkWidget *anchor) {
     gtk_layer_set_monitor(GTK_WINDOW(win), bar->gdk_monitor);
     // bottom-left corner card, flush against the sidebar and bottom
     // border — same glass language as the app launcher
+    // full-monitor surface: the panel hugs the bottom-left corner and
+    // the rest is a transparent click-catcher (click off = close)
     gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_BOTTOM, TRUE);
     gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
+    gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_TOP, TRUE);
+    gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_RIGHT, TRUE);
     gtk_layer_set_margin(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_LEFT,
                          NEKO_FRAME_W);
     gtk_layer_set_margin(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_BOTTOM,
@@ -311,7 +322,25 @@ void quickset_attach(Bar *bar, GtkWidget *anchor) {
     gtk_box_pack_start(GTK_BOX(bevel_row), right_sp, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(outer), bevel_row, TRUE, TRUE, 0);
     g_signal_connect(win, "draw", G_CALLBACK(qs_draw_bg), bar);
-    gtk_container_add(GTK_CONTAINER(win), outer);
+    g_object_set_data(G_OBJECT(win), "qs-box", frame);
+
+    GtkWidget *rootbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    GtkWidget *leftcol = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    GtkWidget *topcatch = gtk_event_box_new();
+    gtk_event_box_set_visible_window(GTK_EVENT_BOX(topcatch), FALSE);
+    gtk_widget_set_vexpand(topcatch, TRUE);
+    g_signal_connect_swapped(topcatch, "button-press-event",
+                             G_CALLBACK(qs_click_off), bar);
+    gtk_box_pack_start(GTK_BOX(leftcol), topcatch, TRUE, TRUE, 0);
+    gtk_box_pack_end(GTK_BOX(leftcol), outer, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(rootbox), leftcol, FALSE, FALSE, 0);
+    GtkWidget *rightcatch = gtk_event_box_new();
+    gtk_event_box_set_visible_window(GTK_EVENT_BOX(rightcatch), FALSE);
+    gtk_widget_set_hexpand(rightcatch, TRUE);
+    g_signal_connect_swapped(rightcatch, "button-press-event",
+                             G_CALLBACK(qs_click_off), bar);
+    gtk_box_pack_start(GTK_BOX(rootbox), rightcatch, TRUE, TRUE, 0);
+    gtk_container_add(GTK_CONTAINER(win), rootbox);
 
     GtkWidget *v = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_container_set_border_width(GTK_CONTAINER(v), 12);
@@ -348,6 +377,8 @@ void quickset_attach(Bar *bar, GtkWidget *anchor) {
     gtk_box_pack_start(GTK_BOX(v), bar->qs_sink_box, FALSE, FALSE, 0);
 }
 
+static gint64 qs_last_autoclose_us;
+
 static gboolean qs_tick_cb(GtkWidget *w, GdkFrameClock *clock,
                            gpointer data) {
     (void)w;
@@ -382,12 +413,32 @@ static void qs_animate(Bar *bar, int target) {
     }
 }
 
+static gboolean qs_click_off(Bar *bar) {
+    qs_last_autoclose_us = g_get_monotonic_time();
+    qs_animate(bar, 0);
+    return TRUE;
+}
+
+// backstop driven from hypr.c: a window took focus / mouse left monitor
+void quickset_autoclose(void) {
+    for (guint i = 0; i < bars->len; i++) {
+        Bar *bar = g_ptr_array_index(bars, i);
+        if (bar->qs_target == 1) {
+            qs_last_autoclose_us = g_get_monotonic_time();
+            qs_animate(bar, 0);
+        }
+    }
+}
+
 void quickset_toggle(Bar *bar) {
     if (!bar->qs_popover)
         return;
     if (bar->qs_target == 1) {
         qs_animate(bar, 0); // chrome retracts, panel fades
     } else {
+        // the click that just auto-closed it shouldn't reopen it
+        if (g_get_monotonic_time() - qs_last_autoclose_us < 400000)
+            return;
         rebuild_sinks(bar);
         quickset_sync();
         gtk_widget_set_opacity(bar->qs_popover, 0.0);
