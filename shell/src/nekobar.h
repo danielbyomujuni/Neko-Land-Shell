@@ -4,6 +4,8 @@
 
 // width of the launcher app-grid extension of the shell chrome
 #define NEKO_LAUNCH_W 316
+// height of the glassy all-apps drawer at the panel's bottom
+#define NEKO_DRAWER_H 600
 
 // One bar instance per monitor.
 typedef struct {
@@ -27,6 +29,10 @@ typedef struct {
     int launch_target;          // 0 = closed, 1 = open
     guint launch_tick;          // frame-clock tick callback id
     gint64 launch_last_us;
+    double drawer_ext;          // 0..1: how far the drawer glass has opened
+    int drawer_target;
+    guint drawer_tick;
+    gint64 drawer_last_us;
     GtkWidget *qs_popover;   // quick settings popover
     GtkWidget *qs_scale;
     GtkWidget *qs_mute_label;

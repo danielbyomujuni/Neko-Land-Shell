@@ -22,7 +22,7 @@
 #define GRID_SLOTS (GRID_COLS * GRID_ROWS)
 #define CELL_W 72
 #define CELL_H 72
-#define DRAWER_H 600
+#define DRAWER_H NEKO_DRAWER_H
 
 static const GtkTargetEntry dnd_target = {
     (char *)"application/x-nekoland-app", GTK_TARGET_SAME_APP, 0};

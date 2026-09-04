@@ -122,6 +122,31 @@ static gboolean frame_draw_cb(GtkWidget *w, cairo_t *cr, gpointer data) {
     rounded_path(cr, hx, hy, hw, hh, FRAME_R);
     cairo_set_source_rgb(cr, 0x11 / 255.0, 0x11 / 255.0, 0x1B / 255.0);
     cairo_fill(cr);
+    // glassy launcher panel: the slab opens up behind the whole panel so
+    // the compositor blur shows the desktop through the grid, with a
+    // short horizontal gradient melting the opaque sidebar into glass
+    if (bar->launch_ext > 0.001) {
+        double gx = bar_w;
+        double gw = bar->launch_ext * NEKO_LAUNCH_W;
+        cairo_save(cr);
+        cairo_set_fill_rule(cr, CAIRO_FILL_RULE_WINDING);
+        cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+        cairo_rectangle(cr, gx, FRAME_W, gw, height - 2 * FRAME_W);
+        cairo_fill(cr);
+        cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+        cairo_pattern_t *grad =
+            cairo_pattern_create_linear(gx, 0, gx + 70, 0);
+        cairo_pattern_add_color_stop_rgba(grad, 0, 0x11 / 255.0,
+                                          0x11 / 255.0, 0x1B / 255.0, 1.0);
+        cairo_pattern_add_color_stop_rgba(grad, 1, 0x11 / 255.0,
+                                          0x11 / 255.0, 0x1B / 255.0, 0.0);
+        cairo_set_source(cr, grad);
+        cairo_rectangle(cr, gx, FRAME_W, MIN(70, gw),
+                        height - 2 * FRAME_W);
+        cairo_fill(cr);
+        cairo_pattern_destroy(grad);
+        cairo_restore(cr);
+    }
     // rim line around the hole
     rounded_path(cr, hx, hy, hw, hh, FRAME_R);
     cairo_set_line_width(cr, 2);

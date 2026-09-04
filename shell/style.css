@@ -214,9 +214,9 @@ window#launcher {
   background: none;
 }
 #launcher-box {
-  /* no box of its own: the chrome slab morphs open underneath and the
-     grid floats on it */
-  background: none;
+  /* glass: the chrome opens up behind the panel and hyprland blurs what
+     shows through (layerrule blur + ignore_alpha on this surface) */
+  background: rgba(17, 17, 27, 0.45);
   border: none;
   padding: 10pt 8pt 10pt 4pt;
 }
@@ -258,6 +258,7 @@ window#launcher {
 }
 #drawer-handle:hover { color: #cdd6f4; }
 #drawer-box {
+  /* solid layer riding on the glass panel */
   background: #181825;
   border-top: solid 2px #1e1e2e;
   border-radius: 12pt 12pt 0 0;
