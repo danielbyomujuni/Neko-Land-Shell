@@ -269,6 +269,34 @@ window#launcher {
   border-radius: 8pt;
 }
 
+/* folders */
+#folder-preview {
+  background: rgba(255, 255, 255, 0.10);
+  border-radius: 8pt;
+  padding: 3pt;
+  min-width: 28px;
+  min-height: 28px;
+}
+#folder-card {
+  /* solid card floating over the pinned grid, like the drawer */
+  background: #181825;
+  border: solid 2px #1e1e2e;
+  border-radius: 12pt;
+  padding: 6pt;
+}
+#folder-name {
+  background: rgba(255, 255, 255, 0.06);
+  color: #cdd6f4;
+  border: none;
+  border-radius: 7pt;
+  box-shadow: none;
+  min-height: 0;
+  padding: 2pt 8pt;
+  margin: 2pt 6pt 4pt 6pt;
+  font-size: 9pt;
+  caret-color: #cdd6f4;
+}
+
 /* round output-picker button beside the volume capsule */
 #qs-out-btn {
   background: rgba(255, 255, 255, 0.10);

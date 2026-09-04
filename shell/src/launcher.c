@@ -1,7 +1,8 @@
 // launcher.c — built-in app launcher, phone-style:
 //  - the main panel (morphing out of the sidebar) is a user-organised grid
-//    of pinned apps: drag apps onto slots to place them, drag between slots
-//    to rearrange (swap), right-click a slot to unpin
+//    of pinned apps: drag apps onto slots to place them, drop one app onto
+//    another to fold them into a folder, drag folders to rearrange,
+//    right-click a slot to unpin
 //  - an "all apps" drawer slides up from the bottom with the search box and
 //    the full application list; drag from it onto the grid to pin
 //  - layout persists in ~/.config/nekoland/launcher-grid.conf
@@ -108,6 +109,125 @@ static void grid_save(void) {
     g_key_file_free(kf);
 }
 
+// ---- folders ----
+//
+// a grid slot either holds a plain desktop id or a folder encoded as
+//   "folder:<name>|<id>;<id>;…"
+// ('|' and ';' are stripped from user-typed names, and don't occur in
+// desktop ids in practice)
+
+#define FOLDER_PREFIX "folder:"
+
+static gboolean is_folder(const char *v) {
+    return v && g_str_has_prefix(v, FOLDER_PREFIX);
+}
+
+// returns the id vector (g_strfreev; entries may be ""); name via out param
+static char **folder_parse(const char *v, char **name_out) {
+    const char *body = v + strlen(FOLDER_PREFIX);
+    const char *sep = strchr(body, '|');
+    if (name_out)
+        *name_out = sep ? g_strndup(body, sep - body) : g_strdup("Folder");
+    return g_strsplit(sep ? sep + 1 : "", ";", -1);
+}
+
+// append id to the folder at slot (no-op on duplicates)
+static void folder_slot_add(int slot, const char *id) {
+    const char *val = g_hash_table_lookup(grid_map, GINT_TO_POINTER(slot));
+    if (!is_folder(val))
+        return;
+    char *name;
+    char **ids = folder_parse(val, &name);
+    GString *s = g_string_new(NULL);
+    gboolean dup = FALSE;
+    int n = 0;
+    for (int i = 0; ids[i]; i++) {
+        if (!*ids[i])
+            continue;
+        if (g_str_equal(ids[i], id))
+            dup = TRUE;
+        g_string_append_printf(s, "%s%s", n++ ? ";" : "", ids[i]);
+    }
+    if (!dup) {
+        g_string_append_printf(s, "%s%s", n++ ? ";" : "", id);
+        g_hash_table_insert(grid_map, GINT_TO_POINTER(slot),
+                            g_strdup_printf(FOLDER_PREFIX "%s|%s", name,
+                                            s->str));
+    }
+    g_string_free(s, TRUE);
+    g_strfreev(ids);
+    g_free(name);
+}
+
+// remove id from the folder at slot; a folder left with one app collapses
+// back to a plain app cell, an empty one vanishes
+static void folder_slot_remove(int slot, const char *id) {
+    const char *val = g_hash_table_lookup(grid_map, GINT_TO_POINTER(slot));
+    if (!is_folder(val))
+        return;
+    char *name;
+    char **ids = folder_parse(val, &name);
+    GString *s = g_string_new(NULL);
+    const char *last = NULL;
+    int n = 0;
+    for (int i = 0; ids[i]; i++) {
+        if (!*ids[i] || g_str_equal(ids[i], id))
+            continue;
+        g_string_append_printf(s, "%s%s", n++ ? ";" : "", ids[i]);
+        last = ids[i];
+    }
+    if (n == 0)
+        g_hash_table_remove(grid_map, GINT_TO_POINTER(slot));
+    else if (n == 1)
+        g_hash_table_insert(grid_map, GINT_TO_POINTER(slot),
+                            g_strdup(last));
+    else
+        g_hash_table_insert(grid_map, GINT_TO_POINTER(slot),
+                            g_strdup_printf(FOLDER_PREFIX "%s|%s", name,
+                                            s->str));
+    g_string_free(s, TRUE);
+    g_strfreev(ids);
+    g_free(name);
+}
+
+// drop an app onto a slot: empty → place, folder → add,
+// another app → fold both into a new folder
+static void slot_place_app(int slot, const char *id) {
+    const char *cur = g_hash_table_lookup(grid_map, GINT_TO_POINTER(slot));
+    if (!cur) {
+        g_hash_table_insert(grid_map, GINT_TO_POINTER(slot), g_strdup(id));
+    } else if (is_folder(cur)) {
+        folder_slot_add(slot, id);
+    } else if (!g_str_equal(cur, id)) {
+        char *nv = g_strdup_printf(FOLDER_PREFIX "Folder|%s;%s", cur, id);
+        g_hash_table_insert(grid_map, GINT_TO_POINTER(slot), nv);
+    }
+}
+
+// is the app pinned anywhere, directly or inside a folder?
+static gboolean grid_contains_app(const char *id) {
+    GHashTableIter it;
+    gpointer k, v;
+    g_hash_table_iter_init(&it, grid_map);
+    while (g_hash_table_iter_next(&it, &k, &v)) {
+        if (is_folder(v)) {
+            char *name;
+            char **ids = folder_parse(v, &name);
+            gboolean found = FALSE;
+            for (int i = 0; ids[i] && !found; i++)
+                if (g_str_equal(ids[i], id))
+                    found = TRUE;
+            g_strfreev(ids);
+            g_free(name);
+            if (found)
+                return TRUE;
+        } else if (g_str_equal(v, id)) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 // ---- morph animation (chrome opens/closes around the panel) ----
 
 static gboolean launcher_visible(Bar *bar) {
@@ -154,7 +274,10 @@ static void launch_animate(Bar *bar, int target) {
     }
 }
 
+static void folder_card_close(Bar *bar);
+
 static void launcher_hide(Bar *bar) {
+    folder_card_close(bar);
     if (launcher_visible(bar))
         launch_animate(bar, 0);
 }
@@ -221,7 +344,8 @@ static void on_app_clicked(GtkWidget *btn, gpointer data) {
 
 // ---- drag and drop ----
 
-// payloads: "app:<desktop id>" (from the drawer) or "slot:<n>" (from grid)
+// payloads: "app:<desktop id>" (from the drawer), "slot:<n>" (from grid),
+// or "fold:<slot>|<id>" (an app dragged out of an open folder)
 
 static void on_drag_get(GtkWidget *w, GdkDragContext *ctx,
                         GtkSelectionData *sel, guint info, guint time,
@@ -273,22 +397,40 @@ static void on_slot_drop(GtkWidget *w, GdkDragContext *ctx, gint x, gint y,
     if (raw && len > 4) {
         char *payload = g_strndup((const char *)raw, len);
         if (g_str_has_prefix(payload, "app:")) {
-            g_hash_table_insert(grid_map, GINT_TO_POINTER(slot),
-                                g_strdup(payload + 4));
+            slot_place_app(slot, payload + 4);
             ok = TRUE;
+        } else if (g_str_has_prefix(payload, "fold:")) {
+            char *sep = strchr(payload + 5, '|');
+            int from = atoi(payload + 5);
+            if (sep && from != slot) {
+                folder_slot_remove(from, sep + 1);
+                slot_place_app(slot, sep + 1);
+                ok = TRUE;
+            }
         } else if (g_str_has_prefix(payload, "slot:")) {
             int from = atoi(payload + 5);
-            if (from != slot) { // swap the two slots
-                char *a = g_strdup(
-                    g_hash_table_lookup(grid_map, GINT_TO_POINTER(from)));
-                char *b = g_strdup(
-                    g_hash_table_lookup(grid_map, GINT_TO_POINTER(slot)));
-                if (b)
-                    g_hash_table_insert(grid_map, GINT_TO_POINTER(from), b);
-                else
+            const char *a =
+                g_hash_table_lookup(grid_map, GINT_TO_POINTER(from));
+            const char *b =
+                g_hash_table_lookup(grid_map, GINT_TO_POINTER(slot));
+            if (from != slot && a) {
+                if (b && !is_folder(a)) {
+                    // an app dropped on an occupied cell folds into it
+                    char *id = g_strdup(a);
                     g_hash_table_remove(grid_map, GINT_TO_POINTER(from));
-                if (a)
-                    g_hash_table_insert(grid_map, GINT_TO_POINTER(slot), a);
+                    slot_place_app(slot, id);
+                    g_free(id);
+                } else {
+                    // folders (and drops on empty cells) move/swap
+                    char *av = g_strdup(a);
+                    char *bv = b ? g_strdup(b) : NULL;
+                    if (bv)
+                        g_hash_table_insert(grid_map, GINT_TO_POINTER(from),
+                                            bv);
+                    else
+                        g_hash_table_remove(grid_map, GINT_TO_POINTER(from));
+                    g_hash_table_insert(grid_map, GINT_TO_POINTER(slot), av);
+                }
                 ok = TRUE;
             }
         }
@@ -409,13 +551,7 @@ static void app_menu_popup(Bar *bar, GAppInfo *info, int slot,
         gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
     } else {
         const char *id = g_app_info_get_id(info);
-        gboolean pinned = FALSE, full = TRUE;
-        GHashTableIter it;
-        gpointer k, v;
-        g_hash_table_iter_init(&it, grid_map);
-        while (g_hash_table_iter_next(&it, &k, &v))
-            if (id && g_str_equal(v, id))
-                pinned = TRUE;
+        gboolean pinned = id && grid_contains_app(id), full = TRUE;
         for (int i = 0; i < GRID_SLOTS && full; i++)
             if (!g_hash_table_lookup(grid_map, GINT_TO_POINTER(i)))
                 full = FALSE;
@@ -457,6 +593,351 @@ static gboolean on_drawer_press(GtkWidget *w, GdkEventButton *ev,
     return FALSE;
 }
 
+// ---- folder cells & popup ----
+
+static gboolean rebuild_idle(gpointer data) {
+    (void)data;
+    grid_rebuild_all();
+    return G_SOURCE_REMOVE;
+}
+
+// mini 2x2 icon preview + folder name
+static GtkWidget *folder_cell_content(const char *val, GHashTable *apps) {
+    char *name;
+    char **ids = folder_parse(val, &name);
+    GtkWidget *v = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
+    GtkWidget *mini = gtk_grid_new();
+    gtk_widget_set_name(mini, "folder-preview");
+    gtk_grid_set_row_spacing(GTK_GRID(mini), 2);
+    gtk_grid_set_column_spacing(GTK_GRID(mini), 2);
+    gtk_widget_set_halign(mini, GTK_ALIGN_CENTER);
+    int n = 0;
+    for (int i = 0; ids[i] && n < 4; i++) {
+        if (!*ids[i])
+            continue;
+        GAppInfo *info = g_hash_table_lookup(apps, ids[i]);
+        GIcon *gicon = info ? g_app_info_get_icon(info) : NULL;
+        GtkWidget *img =
+            gicon ? gtk_image_new_from_gicon(gicon, GTK_ICON_SIZE_MENU)
+                  : gtk_image_new_from_icon_name("application-x-executable",
+                                                 GTK_ICON_SIZE_MENU);
+        gtk_image_set_pixel_size(GTK_IMAGE(img), 13);
+        gtk_grid_attach(GTK_GRID(mini), img, n % 2, n / 2, 1, 1);
+        n++;
+    }
+    gtk_box_pack_start(GTK_BOX(v), mini, FALSE, FALSE, 0);
+    GtkWidget *lbl = gtk_label_new(name);
+    gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_END);
+    gtk_label_set_max_width_chars(GTK_LABEL(lbl), 9);
+    gtk_label_set_justify(GTK_LABEL(lbl), GTK_JUSTIFY_CENTER);
+    gtk_widget_set_name(lbl, "app-label");
+    gtk_box_pack_start(GTK_BOX(v), lbl, FALSE, FALSE, 0);
+    g_strfreev(ids);
+    g_free(name);
+    return v;
+}
+
+// context for an app row inside an open folder card
+typedef struct {
+    Bar *bar;
+    int slot;
+    char *id;
+} FItemCtx;
+
+static FItemCtx *fitem_new(Bar *bar, int slot, const char *id) {
+    FItemCtx *c = g_new0(FItemCtx, 1);
+    c->bar = bar;
+    c->slot = slot;
+    c->id = g_strdup(id);
+    return c;
+}
+
+static void fitem_free(gpointer data, GClosure *closure) {
+    (void)closure;
+    FItemCtx *c = data;
+    g_free(c->id);
+    g_free(c);
+}
+
+static void on_fitem_clicked(GtkWidget *btn, gpointer data) {
+    (void)btn;
+    FItemCtx *c = data;
+    GDesktopAppInfo *info = g_desktop_app_info_new(c->id);
+    if (info) {
+        g_app_info_launch(G_APP_INFO(info), NULL, NULL, NULL);
+        g_object_unref(info);
+    }
+    launcher_hide(c->bar);
+}
+
+static void fitem_remove_cb(GtkMenuItem *item, gpointer data) {
+    (void)item;
+    FItemCtx *c = data;
+    folder_slot_remove(c->slot, c->id);
+    grid_save();
+    folder_card_close(c->bar);
+    g_idle_add(rebuild_idle, NULL);
+}
+
+static void fitem_togrid_cb(GtkMenuItem *item, gpointer data) {
+    (void)item;
+    FItemCtx *c = data;
+    int free_slot = -1;
+    for (int s = 0; s < GRID_SLOTS && free_slot < 0; s++)
+        if (!g_hash_table_lookup(grid_map, GINT_TO_POINTER(s)))
+            free_slot = s;
+    if (free_slot < 0)
+        return;
+    folder_slot_remove(c->slot, c->id);
+    g_hash_table_insert(grid_map, GINT_TO_POINTER(free_slot),
+                        g_strdup(c->id));
+    grid_save();
+    folder_card_close(c->bar);
+    g_idle_add(rebuild_idle, NULL);
+}
+
+static gboolean on_fitem_press(GtkWidget *w, GdkEventButton *ev,
+                               gpointer data) {
+    (void)w;
+    FItemCtx *c = data;
+    if (ev->button != 3)
+        return FALSE;
+    GtkWidget *menu = gtk_menu_new();
+    GtkWidget *item = gtk_menu_item_new_with_label("Move to grid");
+    g_signal_connect_data(item, "activate", G_CALLBACK(fitem_togrid_cb),
+                          fitem_new(c->bar, c->slot, c->id), fitem_free, 0);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+    item = gtk_menu_item_new_with_label("Remove from folder");
+    g_signal_connect_data(item, "activate", G_CALLBACK(fitem_remove_cb),
+                          fitem_new(c->bar, c->slot, c->id), fitem_free, 0);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+    g_signal_connect(menu, "deactivate", G_CALLBACK(on_menu_deactivate),
+                     NULL);
+    ctx_menu_open = TRUE;
+    gtk_widget_show_all(menu);
+    gtk_menu_popup_at_pointer(GTK_MENU(menu), (GdkEvent *)ev);
+    return TRUE;
+}
+
+// rename applied when the card closes (Enter also closes it)
+static gboolean folder_name_commit(Bar *bar) {
+    int slot = bar->folder_slot;
+    GtkWidget *entry =
+        g_object_get_data(G_OBJECT(bar->folder_card), "name-entry");
+    const char *val = g_hash_table_lookup(grid_map, GINT_TO_POINTER(slot));
+    if (!entry || !is_folder(val))
+        return FALSE;
+    char *name;
+    char **ids = folder_parse(val, &name);
+    char *clean = g_strdup(gtk_entry_get_text(GTK_ENTRY(entry)));
+    g_strdelimit(clean, "|;", ' ');
+    g_strstrip(clean);
+    gboolean changed = *clean && !g_str_equal(clean, name);
+    if (changed) {
+        char *joined = g_strjoinv(";", ids);
+        g_hash_table_insert(grid_map, GINT_TO_POINTER(slot),
+                            g_strdup_printf(FOLDER_PREFIX "%s|%s", clean,
+                                            joined));
+        g_free(joined);
+        grid_save();
+    }
+    g_free(clean);
+    g_strfreev(ids);
+    g_free(name);
+    return changed;
+}
+
+// destroy the open folder card, committing a pending rename
+static void folder_card_close(Bar *bar) {
+    if (!bar->folder_card)
+        return;
+    gboolean changed = folder_name_commit(bar);
+    GtkWidget *card = bar->folder_card;
+    bar->folder_card = NULL;
+    gtk_widget_destroy(card);
+    if (changed)
+        g_idle_add(rebuild_idle, NULL);
+}
+
+static void on_folder_name_activate(GtkEntry *entry, gpointer data) {
+    (void)entry;
+    folder_card_close(data);
+}
+
+// open the folder as a card floating over the pinned grid — same surface
+// as the panel, so no popup focus churn and no compositor round-trips
+static void folder_card_open(Bar *bar, int slot) {
+    const char *val = g_hash_table_lookup(grid_map, GINT_TO_POINTER(slot));
+    if (!is_folder(val) || !bar->launcher_overlay)
+        return;
+    folder_card_close(bar);
+    char *name;
+    char **ids = folder_parse(val, &name);
+    GHashTable *apps = apps_by_id();
+
+    GtkWidget *v = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_name(v, "folder-card");
+    gtk_container_set_border_width(GTK_CONTAINER(v), 10);
+    gtk_widget_set_halign(v, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(v, GTK_ALIGN_CENTER);
+    bar->folder_card = v;
+    bar->folder_slot = slot;
+
+    GtkWidget *entry = gtk_entry_new();
+    gtk_widget_set_name(entry, "folder-name");
+    gtk_entry_set_text(GTK_ENTRY(entry), name);
+    gtk_entry_set_alignment(GTK_ENTRY(entry), 0.5);
+    gtk_entry_set_width_chars(GTK_ENTRY(entry), 10);
+    g_signal_connect(entry, "activate",
+                     G_CALLBACK(on_folder_name_activate), bar);
+    gtk_box_pack_start(GTK_BOX(v), entry, FALSE, FALSE, 0);
+
+    GtkWidget *grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 4);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 4);
+    int n = 0;
+    for (int i = 0; ids[i]; i++) {
+        if (!*ids[i])
+            continue;
+        GAppInfo *info = g_hash_table_lookup(apps, ids[i]);
+        GtkWidget *btn = gtk_button_new();
+        gtk_button_set_relief(GTK_BUTTON(btn), GTK_RELIEF_NONE);
+        gtk_widget_set_name(btn, "app-cell");
+        gtk_widget_set_size_request(btn, CELL_W, CELL_H);
+        if (info) {
+            gtk_container_add(GTK_CONTAINER(btn), app_cell_content(info));
+        } else { // app no longer installed — still removable
+            GtkWidget *fb = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
+            GtkWidget *img = gtk_image_new_from_icon_name(
+                "application-x-executable", GTK_ICON_SIZE_DND);
+            gtk_image_set_pixel_size(GTK_IMAGE(img), 34);
+            gtk_box_pack_start(GTK_BOX(fb), img, FALSE, FALSE, 0);
+            GtkWidget *lbl = gtk_label_new(ids[i]);
+            gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_END);
+            gtk_label_set_max_width_chars(GTK_LABEL(lbl), 9);
+            gtk_widget_set_name(lbl, "app-label");
+            gtk_box_pack_start(GTK_BOX(fb), lbl, FALSE, FALSE, 0);
+            gtk_container_add(GTK_CONTAINER(btn), fb);
+        }
+        g_signal_connect_data(btn, "clicked", G_CALLBACK(on_fitem_clicked),
+                              fitem_new(bar, slot, ids[i]), fitem_free, 0);
+        g_signal_connect_data(btn, "button-press-event",
+                              G_CALLBACK(on_fitem_press),
+                              fitem_new(bar, slot, ids[i]), fitem_free, 0);
+        // drag out of the folder back onto the grid (or the drawer handle)
+        char *payload = g_strdup_printf("fold:%d|%s", slot, ids[i]);
+        g_object_set_data_full(G_OBJECT(btn), "dnd-payload", payload,
+                               g_free);
+        gtk_drag_source_set(btn, GDK_BUTTON1_MASK, &dnd_target, 1,
+                            GDK_ACTION_MOVE);
+        GIcon *gicon = info ? g_app_info_get_icon(info) : NULL;
+        if (gicon)
+            gtk_drag_source_set_icon_gicon(btn, gicon);
+        g_signal_connect(btn, "drag-data-get", G_CALLBACK(on_drag_get),
+                         NULL);
+        g_signal_connect(btn, "drag-begin", G_CALLBACK(on_drag_begin),
+                         NULL);
+        g_signal_connect(btn, "drag-end", G_CALLBACK(on_drag_end), NULL);
+        gtk_grid_attach(GTK_GRID(grid), btn, n % 3, n / 3, 1, 1);
+        n++;
+    }
+    gtk_box_pack_start(GTK_BOX(v), grid, FALSE, FALSE, 0);
+
+    g_object_set_data(G_OBJECT(v), "name-entry", entry);
+    gtk_overlay_add_overlay(GTK_OVERLAY(bar->launcher_overlay), v);
+    gtk_widget_show_all(v);
+
+    g_hash_table_destroy(apps);
+    g_strfreev(ids);
+    g_free(name);
+}
+
+static void on_folder_clicked(GtkWidget *btn, gpointer data) {
+    Bar *bar = data;
+    int slot = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "slot"));
+    folder_card_open(bar, slot);
+}
+
+typedef struct {
+    Bar *bar;
+    int slot;
+} FolderMenuCtx;
+
+static void folder_menu_open_cb(GtkMenuItem *item, gpointer data) {
+    (void)item;
+    FolderMenuCtx *c = data;
+    folder_card_open(c->bar, c->slot);
+}
+
+// spill the folder's apps into free slots, then drop the folder itself
+static void folder_menu_disband_cb(GtkMenuItem *item, gpointer data) {
+    (void)item;
+    FolderMenuCtx *c = data;
+    const char *val =
+        g_hash_table_lookup(grid_map, GINT_TO_POINTER(c->slot));
+    if (!is_folder(val))
+        return;
+    char *name;
+    char **ids = folder_parse(val, &name);
+    g_hash_table_remove(grid_map, GINT_TO_POINTER(c->slot));
+    for (int i = 0; ids[i]; i++) {
+        if (!*ids[i])
+            continue;
+        for (int s = 0; s < GRID_SLOTS; s++) {
+            if (!g_hash_table_lookup(grid_map, GINT_TO_POINTER(s))) {
+                g_hash_table_insert(grid_map, GINT_TO_POINTER(s),
+                                    g_strdup(ids[i]));
+                break;
+            }
+        }
+    }
+    g_strfreev(ids);
+    g_free(name);
+    grid_save();
+    grid_rebuild_all();
+}
+
+static void folder_menu_popup(Bar *bar, int slot,
+                              GdkEventButton *ev) {
+    GtkWidget *menu = gtk_menu_new();
+    FolderMenuCtx base = {bar, slot};
+
+    GtkWidget *item = gtk_menu_item_new_with_label("Open");
+    g_signal_connect_data(item, "activate", G_CALLBACK(folder_menu_open_cb),
+                          g_memdup2(&base, sizeof base), str_free_notify, 0);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu),
+                          gtk_separator_menu_item_new());
+
+    item = gtk_menu_item_new_with_label("Disband folder");
+    g_signal_connect_data(item, "activate",
+                          G_CALLBACK(folder_menu_disband_cb),
+                          g_memdup2(&base, sizeof base), str_free_notify, 0);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+
+    item = gtk_menu_item_new_with_label("Unpin");
+    g_signal_connect(item, "activate", G_CALLBACK(menu_unpin_cb),
+                     GINT_TO_POINTER(slot));
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+
+    g_signal_connect(menu, "deactivate", G_CALLBACK(on_menu_deactivate),
+                     NULL);
+    ctx_menu_open = TRUE;
+    gtk_widget_show_all(menu);
+    gtk_menu_popup_at_pointer(GTK_MENU(menu), (GdkEvent *)ev);
+}
+
+static gboolean on_folder_press(GtkWidget *w, GdkEventButton *ev,
+                                gpointer data) {
+    Bar *bar = data;
+    if (ev->button != 3)
+        return FALSE;
+    int slot = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(w), "slot"));
+    folder_menu_popup(bar, slot, ev);
+    return TRUE;
+}
+
 // ---- pinned grid ----
 
 static void grid_rebuild(Bar *bar) {
@@ -470,14 +951,35 @@ static void grid_rebuild(Bar *bar) {
     GHashTable *apps = apps_by_id();
     for (int slot = 0; slot < GRID_SLOTS; slot++) {
         const char *id = g_hash_table_lookup(grid_map, GINT_TO_POINTER(slot));
-        GAppInfo *info = id ? g_hash_table_lookup(apps, id) : NULL;
+        GAppInfo *info =
+            (id && !is_folder(id)) ? g_hash_table_lookup(apps, id) : NULL;
 
         GtkWidget *btn = gtk_button_new();
         gtk_button_set_relief(GTK_BUTTON(btn), GTK_RELIEF_NONE);
         gtk_widget_set_size_request(btn, CELL_W, CELL_H);
         g_object_set_data(G_OBJECT(btn), "slot", GINT_TO_POINTER(slot));
 
-        if (info) {
+        if (id && is_folder(id)) {
+            gtk_widget_set_name(btn, "app-cell");
+            gtk_container_add(GTK_CONTAINER(btn),
+                              folder_cell_content(id, apps));
+            g_signal_connect(btn, "clicked", G_CALLBACK(on_folder_clicked),
+                             bar);
+            char *payload = g_strdup_printf("slot:%d", slot);
+            g_object_set_data_full(G_OBJECT(btn), "dnd-payload", payload,
+                                   g_free);
+            gtk_drag_source_set(btn, GDK_BUTTON1_MASK, &dnd_target, 1,
+                                GDK_ACTION_MOVE);
+            gtk_drag_source_set_icon_name(btn, "folder");
+            g_signal_connect(btn, "drag-data-get", G_CALLBACK(on_drag_get),
+                             NULL);
+            g_signal_connect(btn, "drag-begin", G_CALLBACK(on_drag_begin),
+                             NULL);
+            g_signal_connect(btn, "drag-end", G_CALLBACK(on_drag_end),
+                             NULL);
+            g_signal_connect(btn, "button-press-event",
+                             G_CALLBACK(on_folder_press), bar);
+        } else if (info) {
             gtk_widget_set_name(btn, "app-cell");
             gtk_container_add(GTK_CONTAINER(btn), app_cell_content(info));
             LaunchCtx *c = g_new0(LaunchCtx, 1);
@@ -610,6 +1112,12 @@ static void on_handle_drop(GtkWidget *w, GdkDragContext *ctx, gint x,
         if (g_str_has_prefix(payload, "slot:")) { // unpin
             ok = g_hash_table_remove(grid_map,
                                      GINT_TO_POINTER(atoi(payload + 5)));
+        } else if (g_str_has_prefix(payload, "fold:")) {
+            char *sep = strchr(payload + 5, '|'); // out of its folder
+            if (sep) {
+                folder_slot_remove(atoi(payload + 5), sep + 1);
+                ok = TRUE;
+            }
         }
         g_free(payload);
     }
@@ -632,6 +1140,10 @@ static void on_handle_clicked(GtkWidget *btn, gpointer data) {
 static gboolean launcher_click_off(Bar *bar) {
     if (drag_settling())
         return TRUE;
+    if (bar->folder_card) { // first click off an open folder just closes it
+        folder_card_close(bar);
+        return TRUE;
+    }
     last_autoclose_us = g_get_monotonic_time();
     launcher_hide(bar);
     return TRUE;
@@ -668,8 +1180,10 @@ static gboolean on_key(GtkWidget *w, GdkEventKey *ev, gpointer data) {
     (void)w;
     Bar *bar = data;
     if (ev->keyval == GDK_KEY_Escape) {
-        if (gtk_revealer_get_reveal_child(
-                GTK_REVEALER(bar->launcher_drawer)))
+        if (bar->folder_card)
+            folder_card_close(bar);
+        else if (gtk_revealer_get_reveal_child(
+                     GTK_REVEALER(bar->launcher_drawer)))
             drawer_set_open(bar, FALSE);
         else
             launcher_hide(bar);
@@ -841,6 +1355,7 @@ void launcher_attach(Bar *bar) {
     GtkWidget *overlay = gtk_overlay_new();
     gtk_widget_set_vexpand(overlay, TRUE);
     gtk_box_pack_start(GTK_BOX(box), overlay, TRUE, TRUE, 0);
+    bar->launcher_overlay = overlay;
 
     // base: pinned grid + drawer handle at the bottom
     GtkWidget *base = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);

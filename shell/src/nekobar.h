@@ -30,6 +30,9 @@ typedef struct {
     GtkWidget *launcher_flow;   // drawer: all-apps list
     GtkWidget *launcher_grid;   // pinned grid
     GtkWidget *launcher_drawer; // bottom drawer revealer
+    GtkWidget *launcher_overlay; // hosts grid + drawer + folder card
+    GtkWidget *folder_card;     // open-folder overlay card (NULL when closed)
+    int folder_slot;            // grid slot the open card belongs to
     double launch_ext;          // 0..1: how far the chrome has morphed open
     int launch_target;          // 0 = closed, 1 = open
     guint launch_tick;          // frame-clock tick callback id
