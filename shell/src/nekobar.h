@@ -84,6 +84,9 @@ void launcher_toggle(Bar *bar);
 void launcher_toggle_focused(void); // SIGUSR2 / keybind entry point
 void launcher_autoclose(void); // close open launchers (focus moved away)
 
+// osd.c — macOS-style volume popup on the focused monitor
+void osd_volume_show(void);
+
 // quickset.c — quick settings popover (volume + output picker)
 void quickset_attach(Bar *bar, GtkWidget *anchor);
 void quickset_toggle(Bar *bar);

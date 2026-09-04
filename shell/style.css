@@ -360,3 +360,18 @@ window#launcher {
   font-size: 9pt;
   color: #cdd6f4;
 }
+
+/* volume OSD pill (osd.c) */
+window#osd {
+  background: none;
+}
+#osd-box {
+  background: rgba(17, 17, 27, 0.55);
+  border: solid 2px #1e1e2e;
+  border-radius: 23px;
+  padding: 0 16px;
+}
+#osd-icon {
+  color: #74c7ec;
+  font-size: 12pt;
+}

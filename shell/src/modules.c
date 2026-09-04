@@ -78,8 +78,15 @@ static gboolean vol_tick(gpointer data) {
     sscanf(out, "Volume: %lf", &vol);
     gboolean muted = strstr(out, "MUTED") != NULL;
     g_free(out);
+    // volume HUD on real changes (skip the initial poll at startup)
+    static gboolean have_prev;
+    gboolean changed =
+        have_prev && (ABS(vol - cur_volume) > 0.001 || muted != cur_muted);
+    have_prev = TRUE;
     cur_volume = vol;
     cur_muted = muted;
+    if (changed)
+        osd_volume_show();
 
     // the button shows a fixed quick-settings glyph; volume state lives
     // in the tooltip and the quickset panel
