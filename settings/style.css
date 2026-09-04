@@ -535,3 +535,47 @@ window#adv-modal {
 /* hardware test verdicts */
 .test-pass { color: #00ff44; font-size: 12.5px; }
 .test-fail { color: #ff4444; font-size: 12.5px; }
+
+/* allow-tearing rules */
+.tear-field {
+  color: #9399b2;
+  font-size: 8pt;
+}
+.tear-pattern {
+  font-family: "JetBrainsMono Nerd Font", monospace;
+  font-size: 9pt;
+}
+.tear-matches-live { color: #a6e3a1; font-size: 8.5pt; }
+.tear-remove, .tear-add {
+  background: none;
+  border: none;
+  box-shadow: none;
+  min-width: 0;
+  min-height: 0;
+  padding: 0 4px;
+  font-size: 12pt;
+  color: #9399b2;
+}
+.tear-remove:hover { color: #f38ba8; }
+.tear-add:hover:not(:disabled) { color: #a6e3a1; }
+.tear-entry {
+  background: @view_bg_color;
+  border-radius: 6pt;
+  font-family: "JetBrainsMono Nerd Font", monospace;
+  font-size: 9pt;
+}
+.tear-dot {
+  min-width: 18px;
+  min-height: 18px;
+  border-radius: 9px;
+  padding: 0;
+  border: none;
+  box-shadow: none;
+}
+.tear-dot.sel { box-shadow: 0 0 0 2px @window_bg_color, 0 0 0 4px @accent_bg_color; }
+.tear-dot-0 { background: #74c7ec; }
+.tear-dot-1 { background: #cba6f7; }
+.tear-dot-2 { background: #eba0ac; }
+.tear-dot-3 { background: #f38ba8; }
+.tear-dot-4 { background: #a6e3a1; }
+.tear-dot-5 { background: #b4befe; }

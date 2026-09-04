@@ -32,8 +32,33 @@ static GHashTable *grid_map;
 
 static gboolean ctx_menu_open;   // a context menu belongs to the launcher:
                                  // don't treat its grab as losing focus
+static gboolean drag_active;     // a DnD grab also steals focus; ignore
+                                 // focus-loss while dragging…
+static gint64 drag_end_us;       // …and briefly after the drop settles
 static gint64 last_autoclose_us; // guards the toggle button against
                                  // close-then-reopen on the same click
+
+#define DRAG_GRACE_US 600000
+
+static gboolean drag_settling(void) {
+    return drag_active ||
+           g_get_monotonic_time() - drag_end_us < DRAG_GRACE_US;
+}
+
+static void on_drag_begin(GtkWidget *w, GdkDragContext *ctx, gpointer data) {
+    (void)w;
+    (void)ctx;
+    (void)data;
+    drag_active = TRUE;
+}
+
+static void on_drag_end(GtkWidget *w, GdkDragContext *ctx, gpointer data) {
+    (void)w;
+    (void)ctx;
+    (void)data;
+    drag_active = FALSE;
+    drag_end_us = g_get_monotonic_time();
+}
 
 // ---- persistence ----
 
@@ -272,6 +297,9 @@ static void on_slot_drop(GtkWidget *w, GdkDragContext *ctx, gint x, gint y,
     gtk_style_context_remove_class(gtk_widget_get_style_context(w),
                                    "drop-target");
     gtk_drag_finish(ctx, ok, FALSE, time);
+    // the rebuild below may destroy the drag source before its drag-end
+    // fires, which would leave drag_active stuck — settle it here
+    on_drag_end(NULL, NULL, NULL);
     if (ok) {
         grid_save();
         grid_rebuild_all();
@@ -469,6 +497,10 @@ static void grid_rebuild(Bar *bar) {
                 gtk_drag_source_set_icon_gicon(btn, gicon);
             g_signal_connect(btn, "drag-data-get", G_CALLBACK(on_drag_get),
                              NULL);
+            g_signal_connect(btn, "drag-begin", G_CALLBACK(on_drag_begin),
+                             NULL);
+            g_signal_connect(btn, "drag-end", G_CALLBACK(on_drag_end),
+                             NULL);
             g_signal_connect(btn, "button-press-event",
                              G_CALLBACK(on_slot_press), c);
         } else {
@@ -582,6 +614,7 @@ static void on_handle_drop(GtkWidget *w, GdkDragContext *ctx, gint x,
         g_free(payload);
     }
     gtk_drag_finish(ctx, ok, FALSE, time);
+    on_drag_end(NULL, NULL, NULL);
     if (ok) {
         grid_save();
         grid_rebuild_all();
@@ -597,6 +630,8 @@ static void on_handle_clicked(GtkWidget *btn, gpointer data) {
 
 // clicking the empty area beside the panel closes it
 static gboolean launcher_click_off(Bar *bar) {
+    if (drag_settling())
+        return TRUE;
     last_autoclose_us = g_get_monotonic_time();
     launcher_hide(bar);
     return TRUE;
@@ -609,7 +644,7 @@ static gboolean on_focus_out(GtkWidget *w, GdkEventFocus *ev,
     (void)w;
     (void)ev;
     Bar *bar = data;
-    if (!ctx_menu_open && launcher_visible(bar)) {
+    if (!ctx_menu_open && !drag_settling() && launcher_visible(bar)) {
         last_autoclose_us = g_get_monotonic_time();
         launcher_hide(bar);
     }
@@ -618,7 +653,7 @@ static gboolean on_focus_out(GtkWidget *w, GdkEventFocus *ev,
 
 // backstop for keyboard focus changes (alt-tab etc.), driven from hypr.c
 void launcher_autoclose(void) {
-    if (ctx_menu_open)
+    if (ctx_menu_open || drag_settling())
         return;
     for (guint i = 0; i < bars->len; i++) {
         Bar *bar = g_ptr_array_index(bars, i);
@@ -717,6 +752,10 @@ static void drawer_populate(Bar *bar) {
             if (gicon)
                 gtk_drag_source_set_icon_gicon(btn, gicon);
             g_signal_connect(btn, "drag-data-get", G_CALLBACK(on_drag_get),
+                             NULL);
+            g_signal_connect(btn, "drag-begin", G_CALLBACK(on_drag_begin),
+                             NULL);
+            g_signal_connect(btn, "drag-end", G_CALLBACK(on_drag_end),
                              NULL);
         }
 

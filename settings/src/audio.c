@@ -94,13 +94,118 @@ typedef struct {
     double volume;  // 0..1, max channel (default device only)
     double balance; // -1..1
     gboolean muted;
+    // set for "potential" outputs that need a card-profile switch first
+    // (e.g. the Valve Index on the GPU's second HDMI/DP audio output)
+    char *card;
+    char *profile;
 } Dev;
 
 static void dev_free(gpointer p) {
     Dev *d = p;
     g_free(d->name);
     g_free(d->desc);
+    g_free(d->card);
+    g_free(d->profile);
     g_free(d);
+}
+
+// outputs that exist only under a different card profile (single-profile
+// ALSA cards expose one HDMI/DP audio port at a time — the Valve Index
+// lives on the GPU card's extra2 profile while a monitor holds stereo)
+static void add_profile_outputs(GPtrArray *devs, gboolean include_hidden) {
+    char *argv[] = {"pactl", "--format=json", "list", "cards", NULL};
+    char *out = run_argv(argv);
+    if (!out)
+        return;
+    JsonParser *p = json_parser_new();
+    if (json_parser_load_from_data(p, out, -1, NULL)) {
+        JsonArray *cards = json_node_get_array(json_parser_get_root(p));
+        for (guint i = 0; i < json_array_get_length(cards); i++) {
+            JsonObject *card = json_array_get_object_element(cards, i);
+            const char *cname = json_object_get_string_member(card, "name");
+            const char *active =
+                json_object_has_member(card, "active_profile")
+                    ? json_object_get_string_member(card, "active_profile")
+                    : "";
+            if (!g_str_has_prefix(cname, "alsa_card."))
+                continue;
+            JsonObject *ports =
+                json_object_has_member(card, "ports")
+                    ? json_object_get_object_member(card, "ports")
+                    : NULL;
+            if (!ports)
+                continue;
+            GList *pnames = json_object_get_members(ports);
+            for (GList *l = pnames; l; l = l->next) {
+                JsonObject *port =
+                    json_object_get_object_member(ports, l->data);
+                const char *avail =
+                    json_object_has_member(port, "availability")
+                        ? json_object_get_string_member(port,
+                                                        "availability")
+                        : "";
+                if (g_str_equal(avail, "not available"))
+                    continue;
+                if (!json_object_has_member(port, "profiles"))
+                    continue;
+                JsonArray *profs =
+                    json_object_get_array_member(port, "profiles");
+                // preferred profile: first stereo output on this port
+                const char *prof = NULL;
+                for (guint k = 0; k < json_array_get_length(profs); k++) {
+                    const char *pr =
+                        json_array_get_string_element(profs, k);
+                    if (g_str_has_prefix(pr, "output:") &&
+                        !strstr(pr, "surround")) {
+                        prof = pr;
+                        break;
+                    }
+                }
+                if (!prof || g_str_equal(prof, active))
+                    continue; // no output profile / already active
+
+                // predicted sink name once the profile is switched
+                char *sink = g_strdup_printf(
+                    "alsa_output.%s.%s", cname + strlen("alsa_card."),
+                    prof + strlen("output:"));
+                gboolean dup = FALSE;
+                for (guint k = 0; k < devs->len && !dup; k++)
+                    dup = g_str_equal(
+                        ((Dev *)g_ptr_array_index(devs, k))->name, sink);
+                if (dup || (!include_hidden && hidden &&
+                            g_hash_table_contains(hidden, sink))) {
+                    g_free(sink);
+                    continue;
+                }
+
+                const char *desc = NULL;
+                if (json_object_has_member(port, "properties")) {
+                    JsonObject *props =
+                        json_object_get_object_member(port, "properties");
+                    if (json_object_has_member(props,
+                                               "device.product.name"))
+                        desc = json_object_get_string_member(
+                            props, "device.product.name");
+                }
+                if (!desc)
+                    desc = json_object_has_member(port, "description")
+                               ? json_object_get_string_member(
+                                     port, "description")
+                               : sink;
+
+                Dev *d = g_new0(Dev, 1);
+                d->name = sink;
+                d->desc = g_strdup(desc);
+                d->available = TRUE;
+                d->card = g_strdup(cname);
+                d->profile = g_strdup(prof);
+                g_ptr_array_add(devs, d);
+            }
+            g_list_free(pnames);
+        }
+    }
+    g_object_unref(p);
+    g_free(out);
 }
 
 static const char *transport_tag(const char *name) {
@@ -201,6 +306,8 @@ static GPtrArray *list_devices(gboolean input, gboolean include_hidden) {
     g_object_unref(p);
     g_free(out);
     g_free(def);
+    if (!input)
+        add_profile_outputs(devs, include_hidden);
     return devs;
 }
 
@@ -209,6 +316,8 @@ static GPtrArray *list_devices(gboolean input, gboolean include_hidden) {
 typedef struct {
     char *name;
     gboolean input;
+    char *card;    // when set: switch this card's profile first
+    char *profile;
 } DevClick;
 
 static gboolean poke_refresh(gpointer data) {
@@ -217,9 +326,29 @@ static gboolean poke_refresh(gpointer data) {
     return FALSE;
 }
 
+static gboolean set_default_later(gpointer data) {
+    char *name = data;
+    char *cmd = g_strdup_printf("pactl set-default-sink %s", name);
+    run_cmd(cmd);
+    g_free(cmd);
+    g_free(name);
+    g_timeout_add(300, poke_refresh, NULL);
+    return G_SOURCE_REMOVE;
+}
+
 static void on_dev_clicked(GtkWidget *btn, gpointer data) {
     (void)btn;
     DevClick *dc = data;
+    if (dc->card) {
+        // potential output: activate its card profile, then make the
+        // resulting sink the default once it has appeared
+        char *cmd = g_strdup_printf("pactl set-card-profile %s %s",
+                                    dc->card, dc->profile);
+        run_cmd(cmd);
+        g_free(cmd);
+        g_timeout_add(400, set_default_later, g_strdup(dc->name));
+        return;
+    }
     char *cmd = g_strdup_printf("pactl set-default-%s %s",
                                 dc->input ? "source" : "sink", dc->name);
     run_cmd(cmd);
@@ -231,6 +360,8 @@ static void dev_click_free(gpointer data, GClosure *closure) {
     (void)closure;
     DevClick *dc = data;
     g_free(dc->name);
+    g_free(dc->card);
+    g_free(dc->profile);
     g_free(dc);
 }
 
@@ -299,6 +430,8 @@ static void rebuild_list(GtkWidget *box, gboolean input, char *sig,
         DevClick *dc = g_new0(DevClick, 1);
         dc->name = g_strdup(d->name);
         dc->input = input;
+        dc->card = g_strdup(d->card);
+        dc->profile = g_strdup(d->profile);
         g_signal_connect_data(row, "clicked", G_CALLBACK(on_dev_clicked), dc,
                               dev_click_free, 0);
         gtk_box_append(GTK_BOX(box), row);
