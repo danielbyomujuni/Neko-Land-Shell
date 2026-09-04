@@ -141,7 +141,7 @@ static void on_out_btn(GtkWidget *btn, gpointer data) {
 static GHashTable *load_hidden(void); // defined with the sink picker
 
 // id of the loopback module feeding from a source, 0 when none runs
-static guint loopback_module_for(const char *src) {
+guint quickset_loopback_for(const char *src) {
     char *out = NULL;
     guint id = 0;
     if (!g_spawn_command_line_sync("pactl list modules short", &out, NULL,
@@ -209,7 +209,7 @@ static gboolean on_mon_switch(GtkSwitch *sw, gboolean state, gpointer data) {
     (void)sw;
     const char *src = data;
     if (state) {
-        if (!loopback_module_for(src)) {
+        if (!quickset_loopback_for(src)) {
             // 20ms: 5ms starved the graph under load and the underruns
             // sounded like distortion
             char *cmd = g_strdup_printf(
@@ -233,7 +233,7 @@ static gboolean on_mon_switch(GtkSwitch *sw, gboolean state, gpointer data) {
             }
         }
     } else {
-        guint id = loopback_module_for(src);
+        guint id = quickset_loopback_for(src);
         if (id) {
             char *cmd = g_strdup_printf("pactl unload-module %u", id);
             g_spawn_command_line_sync(cmd, NULL, NULL, NULL, NULL);
@@ -290,7 +290,7 @@ static void rebuild_monitors(Bar *bar) {
             GtkWidget *sw = gtk_switch_new();
             gtk_widget_set_valign(sw, GTK_ALIGN_CENTER);
             gtk_switch_set_active(GTK_SWITCH(sw),
-                                  loopback_module_for(name) != 0);
+                                  quickset_loopback_for(name) != 0);
             g_signal_connect_data(sw, "state-set",
                                   G_CALLBACK(on_mon_switch),
                                   g_strdup(name), mon_src_free, 0);

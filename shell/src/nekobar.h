@@ -104,3 +104,4 @@ void quickset_toggle(Bar *bar);
 void quickset_toggle_focused(void);
 void quickset_sync(void); // update sliders/mute icons from cur_volume/cur_muted
 void quickset_autoclose(void); // close open panels (focus moved away)
+guint quickset_loopback_for(const char *src); // loopback module id, 0=none

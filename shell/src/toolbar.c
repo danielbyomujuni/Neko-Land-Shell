@@ -32,6 +32,7 @@ typedef struct {
     GtkWidget *menubar; // VSCodium File/Edit/… strip (pill mode only)
     GtkWidget *icon;    // leading glyph: music note / monitoring mic
     GtkWidget *ctl[3];  // prev / play-pause / next (music only)
+    GtkWidget *mon_off; // stop-monitoring button (monitoring only)
     GtkWidget *title;
     GtkWidget *play; // play/pause label flips with status
     int last_x, last_y; // last gtk_fixed_move, to skip redundant moves
@@ -47,6 +48,7 @@ static guint grace_id;
 
 static void tb_slab_sized(GtkWidget *w, GdkRectangle *alloc,
                           gpointer data); // defined with the pill morph
+static void on_tb_monoff(GtkWidget *b, gpointer d); // with the providers
 
 // ---- audio visualizer (cava raw ascii → bars behind the content) ----
 
@@ -484,6 +486,10 @@ static TbWin *tb_win_new(Bar *bar) {
     gtk_box_pack_start(GTK_BOX(box), tw->ctl[1], FALSE, FALSE, 0);
     tw->ctl[2] = tb_button("\U000F04AD", G_CALLBACK(on_tb_next));
     gtk_box_pack_start(GTK_BOX(box), tw->ctl[2], FALSE, FALSE, 0);
+    // monitoring-only: mic-off stops the shown input's loopback
+    tw->mon_off = tb_button("\U000F036D", G_CALLBACK(on_tb_monoff));
+    gtk_widget_set_tooltip_text(tw->mon_off, "Stop monitoring this input");
+    gtk_box_pack_start(GTK_BOX(box), tw->mon_off, FALSE, FALSE, 0);
 
     tw->slab = slab;
     tw->content = box;
@@ -733,6 +739,25 @@ void toolbar_refocus(void) {
 static gboolean music_on; // yt music playing (or within the pause grace)
 static gboolean mon_on;   // a direct-monitoring loopback is running
 static char mon_label[160];
+static char mon_src[256]; // source of the loopback the bar is showing
+
+void toolbar_monitor_poke(void);
+
+// mic-off button: unload the shown input's loopback (if more inputs are
+// monitored, the bar moves on to the next one)
+static void on_tb_monoff(GtkWidget *b, gpointer d) {
+    (void)b;
+    (void)d;
+    if (!*mon_src)
+        return;
+    guint id = quickset_loopback_for(mon_src);
+    if (id) {
+        char *cmd = g_strdup_printf("pactl unload-module %u", id);
+        g_spawn_command_line_sync(cmd, NULL, NULL, NULL, NULL);
+        g_free(cmd);
+    }
+    toolbar_monitor_poke();
+}
 
 // present the content row for the current audio source: music keeps its
 // transport controls; input monitoring is a mic + the input's name
@@ -741,11 +766,13 @@ static void tw_refresh_content(TbWin *tw) {
         gtk_label_set_text(GTK_LABEL(tw->icon), "\U000F075A");
         for (int i = 0; i < 3; i++)
             gtk_widget_set_visible(tw->ctl[i], TRUE);
+        gtk_widget_set_visible(tw->mon_off, FALSE);
     } else if (mon_on) {
         gtk_label_set_text(GTK_LABEL(tw->icon), "\U000F036C"); // mic
         gtk_label_set_text(GTK_LABEL(tw->title), mon_label);
         for (int i = 0; i < 3; i++)
             gtk_widget_set_visible(tw->ctl[i], FALSE);
+        gtk_widget_set_visible(tw->mon_off, TRUE);
     }
 }
 
@@ -838,6 +865,7 @@ static void tb_check_monitoring(void) {
         g_free(out);
     }
     mon_on = count > 0;
+    g_strlcpy(mon_src, mon_on ? first_src : "", sizeof(mon_src));
     if (mon_on) {
         // human name for the monitored input
         char *desc = NULL;
