@@ -8,31 +8,152 @@
 #include <string.h>
 
 static gboolean updating; // guard: we're setting the slider, not the user
+static gboolean refresh_later_cb(gpointer data);
 
 // ---- backend ----
 
-static void on_scale_changed(GtkRange *range, gpointer data) {
+#define VOLCAP_ICON_ZONE 44.0 // left region that toggles mute on click
+
+static gboolean volcap_draw(GtkWidget *w, cairo_t *cr, gpointer data) {
     (void)data;
-    if (updating)
-        return;
+    double W = gtk_widget_get_allocated_width(w);
+    double H = gtk_widget_get_allocated_height(w);
+    double r = H / 2;
+    double vol = CLAMP(cur_volume, 0.0, 1.0);
+
+    // capsule track
+    cairo_new_sub_path(cr);
+    cairo_arc(cr, r, r, r, G_PI / 2, 3 * G_PI / 2);
+    cairo_arc(cr, W - r, r, r, -G_PI / 2, G_PI / 2);
+    cairo_close_path(cr);
+    cairo_set_source_rgba(cr, 1, 1, 1, 0.10);
+    cairo_fill_preserve(cr);
+    // fill: clip to the capsule, paint the filled fraction from the left
+    cairo_clip(cr);
+    if (!cur_muted && vol > 0.001) {
+        cairo_rectangle(cr, 0, 0, W * vol, H);
+        cairo_set_source_rgba(cr, 0xCD / 255.0, 0xD6 / 255.0, 0xF4 / 255.0,
+                              0.95);
+        cairo_fill(cr);
+    }
+    cairo_reset_clip(cr);
+
+    // speaker glyph inside, iOS-style: dark over the fill, light over track
+    const char *icon = cur_muted        ? "\U000F075F"
+                       : vol < 0.34     ? "\U000F057F"
+                       : vol < 0.67     ? "\U000F0580"
+                                        : "\U000F057E";
+    PangoLayout *pl = gtk_widget_create_pango_layout(w, icon);
+    PangoFontDescription *fd =
+        pango_font_description_from_string("JetBrainsMono Nerd Font 11");
+    pango_layout_set_font_description(pl, fd);
+    pango_font_description_free(fd);
+    int iw, ih;
+    pango_layout_get_pixel_size(pl, &iw, &ih);
+    gboolean over_fill = !cur_muted && W * vol > 16 + iw;
+    if (over_fill)
+        cairo_set_source_rgba(cr, 0x11 / 255.0, 0x11 / 255.0, 0x1B / 255.0,
+                              0.9);
+    else
+        cairo_set_source_rgba(cr, 0xCD / 255.0, 0xD6 / 255.0, 0xF4 / 255.0,
+                              0.8);
+    cairo_move_to(cr, 16, (H - ih) / 2);
+    pango_cairo_show_layout(cr, pl);
+    g_object_unref(pl);
+    return TRUE;
+}
+
+static void volcap_redraw_all(void) {
+    for (guint i = 0; i < bars->len; i++) {
+        Bar *bar = g_ptr_array_index(bars, i);
+        if (bar->qs_scale)
+            gtk_widget_queue_draw(bar->qs_scale);
+    }
+}
+
+static void volcap_set_from_x(GtkWidget *w, double x) {
+    double W = gtk_widget_get_allocated_width(w);
+    double vol = CLAMP(x / W, 0.0, 1.0);
+    cur_volume = vol; // instant visual feedback
     char cmd[128];
     g_snprintf(cmd, sizeof(cmd),
                "wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ %d%%",
-               (int)gtk_range_get_value(range));
+               (int)(vol * 100 + 0.5));
     spawn_cmd(cmd);
+    volcap_redraw_all();
+}
+
+static gboolean volcap_press(GtkWidget *w, GdkEventButton *ev,
+                             gpointer data) {
+    (void)data;
+    if (ev->button != 1)
+        return FALSE;
+    if (ev->x < VOLCAP_ICON_ZONE) { // icon zone: toggle mute
+        spawn_cmd("wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle");
+        cur_muted = !cur_muted;
+        volcap_redraw_all();
+        g_timeout_add(250, refresh_later_cb, NULL);
+        return TRUE;
+    }
+    g_object_set_data(G_OBJECT(w), "dragging", GINT_TO_POINTER(1));
+    volcap_set_from_x(w, ev->x);
+    return TRUE;
+}
+
+static gboolean volcap_release(GtkWidget *w, GdkEventButton *ev,
+                               gpointer data) {
+    (void)ev;
+    (void)data;
+    g_object_set_data(G_OBJECT(w), "dragging", GINT_TO_POINTER(0));
+    return TRUE;
+}
+
+static gboolean volcap_motion(GtkWidget *w, GdkEventMotion *ev,
+                              gpointer data) {
+    (void)data;
+    if (g_object_get_data(G_OBJECT(w), "dragging"))
+        volcap_set_from_x(w, ev->x);
+    return TRUE;
+}
+
+static void rebuild_sinks(Bar *bar);
+
+// circle button beside the slider: expands the output-device picker
+// (macOS control-center style)
+static void on_out_btn(GtkWidget *btn, gpointer data) {
+    (void)btn;
+    Bar *bar = data;
+    GtkRevealer *rev = g_object_get_data(G_OBJECT(bar->qs_popover),
+                                         "out-revealer");
+    gboolean open = !gtk_revealer_get_reveal_child(rev);
+    if (open)
+        rebuild_sinks(bar);
+    gtk_revealer_set_reveal_child(rev, open);
+}
+
+static gboolean volcap_scroll(GtkWidget *w, GdkEventScroll *ev,
+                              gpointer data) {
+    (void)w;
+    (void)data;
+    if (ev->direction == GDK_SCROLL_UP)
+        cur_volume = CLAMP(cur_volume + 0.05, 0.0, 1.0);
+    else if (ev->direction == GDK_SCROLL_DOWN)
+        cur_volume = CLAMP(cur_volume - 0.05, 0.0, 1.0);
+    else
+        return FALSE;
+    char cmd[128];
+    g_snprintf(cmd, sizeof(cmd),
+               "wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ %d%%",
+               (int)(cur_volume * 100 + 0.5));
+    spawn_cmd(cmd);
+    volcap_redraw_all();
+    return TRUE;
 }
 
 static gboolean refresh_later_cb(gpointer data) {
     (void)data;
     volume_refresh();
     return FALSE;
-}
-
-static void on_mute_clicked(GtkWidget *btn, gpointer data) {
-    (void)btn;
-    (void)data;
-    spawn_cmd("wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle");
-    g_timeout_add(250, refresh_later_cb, NULL);
 }
 
 typedef struct {
@@ -205,14 +326,7 @@ static void rebuild_sinks(Bar *bar) {
 
 void quickset_sync(void) {
     updating = TRUE;
-    for (guint i = 0; i < bars->len; i++) {
-        Bar *bar = g_ptr_array_index(bars, i);
-        if (!bar->qs_scale)
-            continue;
-        gtk_range_set_value(GTK_RANGE(bar->qs_scale), cur_volume * 100.0);
-        gtk_label_set_text(GTK_LABEL(bar->qs_mute_label),
-                           cur_muted ? "\U000F075F" : "\U000F057E");
-    }
+    volcap_redraw_all();
     updating = FALSE;
 }
 
@@ -346,35 +460,63 @@ void quickset_attach(Bar *bar, GtkWidget *anchor) {
     gtk_container_set_border_width(GTK_CONTAINER(v), 12);
     gtk_box_pack_start(GTK_BOX(frame), v, FALSE, FALSE, 0);
 
-    // volume row: mute toggle + slider
-    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    GtkWidget *mute = gtk_button_new_with_label("\U000F057E");
-    bar->qs_mute_label = gtk_bin_get_child(GTK_BIN(mute));
-    gtk_button_set_relief(GTK_BUTTON(mute), GTK_RELIEF_NONE);
-    gtk_widget_set_name(mute, "qs-mute");
-    g_signal_connect(mute, "clicked", G_CALLBACK(on_mute_clicked), NULL);
-    gtk_box_pack_start(GTK_BOX(row), mute, FALSE, FALSE, 0);
+    // volume: iOS-style capsule — the fill is the control, the speaker
+    // icon inside toggles mute, drag anywhere to set
+    bar->qs_scale = gtk_event_box_new();
+    gtk_event_box_set_visible_window(GTK_EVENT_BOX(bar->qs_scale), FALSE);
+    // the drawing area has its own GdkWindow that would eat the clicks;
+    // the event box's input window must sit above it
+    gtk_event_box_set_above_child(GTK_EVENT_BOX(bar->qs_scale), TRUE);
+    GtkWidget *volarea = gtk_drawing_area_new();
+    gtk_widget_set_size_request(volarea, 220, 36);
+    g_signal_connect(volarea, "draw", G_CALLBACK(volcap_draw), NULL);
+    gtk_container_add(GTK_CONTAINER(bar->qs_scale), volarea);
+    gtk_widget_add_events(bar->qs_scale, GDK_BUTTON_PRESS_MASK |
+                                             GDK_BUTTON_RELEASE_MASK |
+                                             GDK_POINTER_MOTION_MASK |
+                                             GDK_SCROLL_MASK);
+    g_signal_connect(bar->qs_scale, "scroll-event",
+                     G_CALLBACK(volcap_scroll), NULL);
+    g_signal_connect(bar->qs_scale, "button-press-event",
+                     G_CALLBACK(volcap_press), NULL);
+    g_signal_connect(bar->qs_scale, "button-release-event",
+                     G_CALLBACK(volcap_release), NULL);
+    g_signal_connect(bar->qs_scale, "motion-notify-event",
+                     G_CALLBACK(volcap_motion), NULL);
+    bar->qs_mute_label = NULL; // capsule shows mute state itself
 
-    bar->qs_scale =
-        gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 0, 100, 1);
-    gtk_scale_set_draw_value(GTK_SCALE(bar->qs_scale), FALSE);
-    gtk_widget_set_size_request(bar->qs_scale, 220, -1);
-    gtk_widget_set_name(bar->qs_scale, "qs-scale");
-    g_signal_connect(bar->qs_scale, "value-changed",
-                     G_CALLBACK(on_scale_changed), NULL);
-    gtk_box_pack_start(GTK_BOX(row), bar->qs_scale, TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(v), row, FALSE, FALSE, 0);
+    // slider row: capsule + round output-picker button
+    GtkWidget *volrow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_box_pack_start(GTK_BOX(volrow), bar->qs_scale, TRUE, TRUE, 0);
+    GtkWidget *outbtn = gtk_button_new_with_label("\U000F02CB");
+    gtk_button_set_relief(GTK_BUTTON(outbtn), GTK_RELIEF_NONE);
+    gtk_widget_set_name(outbtn, "qs-out-btn");
+    gtk_widget_set_size_request(outbtn, 36, 36);
+    gtk_widget_set_valign(outbtn, GTK_ALIGN_CENTER);
+    g_signal_connect(outbtn, "clicked", G_CALLBACK(on_out_btn), bar);
+    gtk_box_pack_start(GTK_BOX(volrow), outbtn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(v), volrow, FALSE, FALSE, 0);
+
+    // output picker, collapsed until the circle button opens it
+    GtkWidget *rev = gtk_revealer_new();
+    gtk_revealer_set_transition_type(GTK_REVEALER(rev),
+                                     GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
+    gtk_revealer_set_transition_duration(GTK_REVEALER(rev), 200);
+    g_object_set_data(G_OBJECT(win), "out-revealer", rev);
+    GtkWidget *outv = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
 
     GtkWidget *sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
-    gtk_box_pack_start(GTK_BOX(v), sep, FALSE, FALSE, 2);
+    gtk_box_pack_start(GTK_BOX(outv), sep, FALSE, FALSE, 2);
 
     GtkWidget *hdr = gtk_label_new("Output");
     gtk_label_set_xalign(GTK_LABEL(hdr), 0.0);
     gtk_widget_set_name(hdr, "qs-header");
-    gtk_box_pack_start(GTK_BOX(v), hdr, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(outv), hdr, FALSE, FALSE, 0);
 
     bar->qs_sink_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-    gtk_box_pack_start(GTK_BOX(v), bar->qs_sink_box, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(outv), bar->qs_sink_box, FALSE, FALSE, 0);
+    gtk_container_add(GTK_CONTAINER(rev), outv);
+    gtk_box_pack_start(GTK_BOX(v), rev, FALSE, FALSE, 0);
 }
 
 static gint64 qs_last_autoclose_us;
@@ -443,6 +585,10 @@ void quickset_toggle(Bar *bar) {
         quickset_sync();
         gtk_widget_set_opacity(bar->qs_popover, 0.0);
         gtk_widget_show_all(bar->qs_popover);
+        GtkRevealer *rev = g_object_get_data(G_OBJECT(bar->qs_popover),
+                                             "out-revealer");
+        if (rev)
+            gtk_revealer_set_reveal_child(rev, FALSE);
         qs_animate(bar, 1);
     }
 }
