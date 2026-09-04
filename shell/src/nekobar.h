@@ -96,6 +96,7 @@ void vr_start(void); // status poll timer
 // toolbar.c — context toolbar sliding from the top (YouTube Music etc.)
 void toolbar_start(void);
 void toolbar_refocus(void); // re-evaluate per-monitor mode (focused app)
+void toolbar_monitor_poke(void); // input-monitoring loopbacks changed
 
 // quickset.c — quick settings popover (volume + output picker)
 void quickset_attach(Bar *bar, GtkWidget *anchor);

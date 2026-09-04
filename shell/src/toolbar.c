@@ -30,6 +30,8 @@ typedef struct {
     GtkWidget *content; // icon/title/controls row
     GtkWidget *fix;  // GtkFixed: content placed at explicit coordinates
     GtkWidget *menubar; // VSCodium File/Edit/… strip (pill mode only)
+    GtkWidget *icon;    // leading glyph: music note / monitoring mic
+    GtkWidget *ctl[3];  // prev / play-pause / next (music only)
     GtkWidget *title;
     GtkWidget *play; // play/pause label flips with status
     int last_x, last_y; // last gtk_fixed_move, to skip redundant moves
@@ -462,9 +464,9 @@ static TbWin *tb_win_new(Bar *bar) {
                                 "tb-content"); // colour-fade base
     g_signal_connect(box, "draw", G_CALLBACK(tb_content_draw), tw);
 
-    GtkWidget *icon = gtk_label_new("\U000F075A"); // music note
-    gtk_widget_set_name(icon, "tb-icon");
-    gtk_box_pack_start(GTK_BOX(box), icon, FALSE, FALSE, 0);
+    tw->icon = gtk_label_new("\U000F075A"); // music note (or mic)
+    gtk_widget_set_name(tw->icon, "tb-icon");
+    gtk_box_pack_start(GTK_BOX(box), tw->icon, FALSE, FALSE, 0);
 
     tw->title = gtk_label_new("");
     gtk_widget_set_name(tw->title, "toolbar-title");
@@ -475,15 +477,13 @@ static TbWin *tb_win_new(Bar *bar) {
     gtk_label_set_xalign(GTK_LABEL(tw->title), 0.0);
     gtk_box_pack_start(GTK_BOX(box), tw->title, FALSE, FALSE, 0);
 
-    gtk_box_pack_start(GTK_BOX(box),
-                       tb_button("\U000F04AE", G_CALLBACK(on_tb_prev)),
-                       FALSE, FALSE, 0);
-    GtkWidget *play = tb_button("\U000F03E4", G_CALLBACK(on_tb_play));
-    tw->play = gtk_bin_get_child(GTK_BIN(play));
-    gtk_box_pack_start(GTK_BOX(box), play, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(box),
-                       tb_button("\U000F04AD", G_CALLBACK(on_tb_next)),
-                       FALSE, FALSE, 0);
+    tw->ctl[0] = tb_button("\U000F04AE", G_CALLBACK(on_tb_prev));
+    gtk_box_pack_start(GTK_BOX(box), tw->ctl[0], FALSE, FALSE, 0);
+    tw->ctl[1] = tb_button("\U000F03E4", G_CALLBACK(on_tb_play));
+    tw->play = gtk_bin_get_child(GTK_BIN(tw->ctl[1]));
+    gtk_box_pack_start(GTK_BOX(box), tw->ctl[1], FALSE, FALSE, 0);
+    tw->ctl[2] = tb_button("\U000F04AD", G_CALLBACK(on_tb_next));
+    gtk_box_pack_start(GTK_BOX(box), tw->ctl[2], FALSE, FALSE, 0);
 
     tw->slab = slab;
     tw->content = box;
@@ -731,6 +731,23 @@ void toolbar_refocus(void) {
 }
 
 static gboolean music_on; // yt music playing (or within the pause grace)
+static gboolean mon_on;   // a direct-monitoring loopback is running
+static char mon_label[160];
+
+// present the content row for the current audio source: music keeps its
+// transport controls; input monitoring is a mic + the input's name
+static void tw_refresh_content(TbWin *tw) {
+    if (music_on) {
+        gtk_label_set_text(GTK_LABEL(tw->icon), "\U000F075A");
+        for (int i = 0; i < 3; i++)
+            gtk_widget_set_visible(tw->ctl[i], TRUE);
+    } else if (mon_on) {
+        gtk_label_set_text(GTK_LABEL(tw->icon), "\U000F036C"); // mic
+        gtk_label_set_text(GTK_LABEL(tw->title), mon_label);
+        for (int i = 0; i < 3; i++)
+            gtk_widget_set_visible(tw->ctl[i], FALSE);
+    }
+}
 
 // one window on/off, with its chrome inset and morph housekeeping
 static void tw_set_shown(TbWin *tw, gboolean on) {
@@ -746,8 +763,9 @@ static void tw_set_shown(TbWin *tw, gboolean on) {
                 gtk_widget_hide(tw->menubar);
             }
         }
-        // the music row only exists when music drives the bar
-        gtk_widget_set_visible(tw->content, music_on);
+        // the content row exists whenever some audio drives the bar
+        gtk_widget_set_visible(tw->content, music_on || mon_on);
+        tw_refresh_content(tw);
         if (tw->bar->tb_inset != TB_H) {
             tw->bar->tb_inset = TB_H;
             gtk_widget_queue_draw(tw->bar->frame);
@@ -777,15 +795,92 @@ static void tb_apply_visibility(void) {
     gboolean any = FALSE;
     for (guint i = 0; tb_wins && i < tb_wins->len; i++) {
         TbWin *tw = g_ptr_array_index(tb_wins, i);
-        gboolean want = music_on || tw->pill;
+        gboolean want = music_on || mon_on || tw->pill;
         tw_set_shown(tw, want);
         any = any || want;
     }
-    if (music_on)
+    if (music_on || mon_on)
         viz_start();
     else
         viz_stop();
     (void)any;
+}
+
+// ---- direct-monitoring provider: any module-loopback (quickset's input
+// monitoring) puts the bar up with the visualizer — the loopback feeds
+// the default sink, which is exactly what cava is listening to ----
+
+static void tb_check_monitoring(void) {
+    gboolean was = mon_on;
+    char first_src[256] = "";
+    int count = 0;
+    char *out = NULL;
+    g_spawn_command_line_sync("pactl list modules short", &out, NULL, NULL,
+                              NULL);
+    if (out) {
+        char **lines = g_strsplit(out, "\n", -1);
+        for (int i = 0; lines[i]; i++) {
+            if (!strstr(lines[i], "module-loopback"))
+                continue;
+            const char *s = strstr(lines[i], "source=");
+            if (!s)
+                continue;
+            s += 7;
+            const char *e = s;
+            while (*e && *e != ' ' && *e != '\t')
+                e++;
+            if (!count)
+                g_strlcpy(first_src, s,
+                          MIN((gsize)(e - s + 1), sizeof(first_src)));
+            count++;
+        }
+        g_strfreev(lines);
+        g_free(out);
+    }
+    mon_on = count > 0;
+    if (mon_on) {
+        // human name for the monitored input
+        char *desc = NULL;
+        char *js = NULL;
+        g_spawn_command_line_sync("pactl --format=json list sources", &js,
+                                  NULL, NULL, NULL);
+        if (js) {
+            JsonParser *p = json_parser_new();
+            if (json_parser_load_from_data(p, js, -1, NULL)) {
+                JsonArray *arr =
+                    json_node_get_array(json_parser_get_root(p));
+                for (guint i = 0; i < json_array_get_length(arr); i++) {
+                    JsonObject *o = json_array_get_object_element(arr, i);
+                    const char *n =
+                        json_object_get_string_member(o, "name");
+                    if (n && g_str_equal(n, first_src))
+                        desc = g_strdup(json_object_get_string_member(
+                            o, "description"));
+                }
+            }
+            g_object_unref(p);
+            g_free(js);
+        }
+        if (count > 1)
+            g_snprintf(mon_label, sizeof(mon_label),
+                       "Monitoring · %s  +%d", desc ? desc : first_src,
+                       count - 1);
+        else
+            g_snprintf(mon_label, sizeof(mon_label), "Monitoring · %s",
+                       desc ? desc : first_src);
+        g_free(desc);
+    }
+    if (was != mon_on) {
+        tb_apply_visibility();
+    } else if (mon_on) { // label may have changed (different input)
+        for (guint i = 0; tb_wins && i < tb_wins->len; i++)
+            tw_refresh_content(g_ptr_array_index(tb_wins, i));
+    }
+}
+
+// quickset flips a monitoring switch → reflect it right away
+void toolbar_monitor_poke(void) {
+    tb_check_monitoring();
 }
 
 static void tb_hide(void) { // music went away
@@ -879,7 +974,8 @@ static gboolean tb_tick(gpointer data) {
                 grace_id = g_timeout_add_seconds(TB_GRACE_S, grace_expired,
                                                  NULL);
             }
-            for (guint i = 0; tb_wins && i < tb_wins->len; i++) {
+            for (guint i = 0; music_on && tb_wins && i < tb_wins->len;
+                 i++) { // don't clobber the monitoring label
                 TbWin *tw = g_ptr_array_index(tb_wins, i);
                 gtk_label_set_text(GTK_LABEL(tw->title), lbl);
                 gtk_label_set_text(GTK_LABEL(tw->play),
@@ -896,6 +992,7 @@ static gboolean tb_tick(gpointer data) {
 static gboolean tb_poll(gpointer data) {
     (void)data;
     tb_tick(NULL);
+    tb_check_monitoring(); // catches loopbacks toggled outside quickset
     return TRUE;
 }
 
@@ -957,6 +1054,7 @@ static void ev_spawn(void) {
 
 void toolbar_start(void) {
     tb_tick(NULL);
+    tb_check_monitoring();
     ev_spawn();
     g_timeout_add_seconds(5, tb_poll, NULL); // slow fallback only
 }

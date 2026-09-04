@@ -164,16 +164,73 @@ static guint loopback_module_for(const char *src) {
     return id;
 }
 
+// the loopback's playback stream, found by owning module id — so the
+// stream can start muted (its first moments carry a harsh resync burst)
+static guint sink_input_of_module(guint mod) {
+    char modstr[32];
+    g_snprintf(modstr, sizeof(modstr), "%u", mod);
+    guint found = 0;
+    for (int try = 0; try < 5 && !found; try++) {
+        if (try) // the stream can lag the module load by a beat
+            g_usleep(40 * 1000);
+        char *out = NULL;
+        g_spawn_command_line_sync("pactl --format=json list sink-inputs",
+                                  &out, NULL, NULL, NULL);
+        if (!out)
+            continue;
+        JsonParser *p = json_parser_new();
+        if (json_parser_load_from_data(p, out, -1, NULL)) {
+            JsonArray *arr = json_node_get_array(json_parser_get_root(p));
+            for (guint i = 0; i < json_array_get_length(arr); i++) {
+                JsonObject *o = json_array_get_object_element(arr, i);
+                const char *om =
+                    json_object_get_string_member_with_default(
+                        o, "owner_module", "");
+                if (om && g_str_equal(om, modstr))
+                    found =
+                        (guint)json_object_get_int_member(o, "index");
+            }
+        }
+        g_object_unref(p);
+        g_free(out);
+    }
+    return found;
+}
+
+static gboolean unmute_si_cb(gpointer data) {
+    char *cmd = g_strdup_printf("pactl set-sink-input-mute %u 0",
+                                GPOINTER_TO_UINT(data));
+    spawn_cmd(cmd);
+    g_free(cmd);
+    return G_SOURCE_REMOVE;
+}
+
 static gboolean on_mon_switch(GtkSwitch *sw, gboolean state, gpointer data) {
     (void)sw;
     const char *src = data;
     if (state) {
         if (!loopback_module_for(src)) {
+            // 20ms: 5ms starved the graph under load and the underruns
+            // sounded like distortion
             char *cmd = g_strdup_printf(
-                "pactl load-module module-loopback source=%s latency_msec=5",
+                "pactl load-module module-loopback source=%s "
+                "latency_msec=20",
                 src);
-            g_spawn_command_line_sync(cmd, NULL, NULL, NULL, NULL);
+            char *out = NULL;
+            g_spawn_command_line_sync(cmd, &out, NULL, NULL, NULL);
             g_free(cmd);
+            // start muted, unmute once the stream has settled: the
+            // loopback's initial buffer-fill/resync is a harsh burst
+            guint mod = out ? (guint)strtoul(out, NULL, 10) : 0;
+            g_free(out);
+            guint si = mod ? sink_input_of_module(mod) : 0;
+            if (si) {
+                char *mcmd = g_strdup_printf(
+                    "pactl set-sink-input-mute %u 1", si);
+                g_spawn_command_line_sync(mcmd, NULL, NULL, NULL, NULL);
+                g_free(mcmd);
+                g_timeout_add(600, unmute_si_cb, GUINT_TO_POINTER(si));
+            }
         }
     } else {
         guint id = loopback_module_for(src);
@@ -183,6 +240,7 @@ static gboolean on_mon_switch(GtkSwitch *sw, gboolean state, gpointer data) {
             g_free(cmd);
         }
     }
+    toolbar_monitor_poke(); // top bar reflects monitoring immediately
     return FALSE; // let the switch flip
 }
 
