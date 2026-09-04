@@ -1,4 +1,4 @@
-PKGS = gtk+-3.0 gtk-layer-shell-0 json-glib-1.0 dbusmenu-gtk3-0.4
+PKGS = gtk+-3.0 gtk-layer-shell-0 json-glib-1.0 dbusmenu-gtk3-0.4 gio-unix-2.0
 CFLAGS ?= -O2 -Wall -Wextra
 CFLAGS += $(shell pkg-config --cflags $(PKGS))
 LDLIBS = $(shell pkg-config --libs $(PKGS))

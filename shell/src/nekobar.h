@@ -20,7 +20,9 @@ typedef struct {
     GtkWidget *vol_label;
     GtkWidget *launcher;        // app-grid panel (launcher.c)
     GtkWidget *launcher_search;
-    GtkWidget *launcher_flow;
+    GtkWidget *launcher_flow;   // drawer: all-apps list
+    GtkWidget *launcher_grid;   // pinned grid
+    GtkWidget *launcher_drawer; // bottom drawer revealer
     double launch_ext;          // 0..1: how far the chrome has morphed open
     int launch_target;          // 0 = closed, 1 = open
     guint launch_tick;          // frame-clock tick callback id
