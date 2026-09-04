@@ -453,3 +453,20 @@ window#toolbar {
 .tb-content.tb-pill {
   border-color: #1e1e2e;
 }
+
+/* VSCodium menubar in the toolbar strip (pill mode) */
+#vs-menubar button {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0 7px;
+  min-width: 0;
+  min-height: 0;
+}
+#vs-menubar button label {
+  color: #9399b2;
+  font-size: 9pt;
+}
+#vs-menubar button:hover label {
+  color: #cdd6f4;
+}

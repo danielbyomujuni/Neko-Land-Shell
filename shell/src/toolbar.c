@@ -29,6 +29,7 @@ typedef struct {
     GtkWidget *slab;    // full-width strip container
     GtkWidget *content; // icon/title/controls row
     GtkWidget *fix;  // GtkFixed: content placed at explicit coordinates
+    GtkWidget *menubar; // VSCodium File/Edit/… strip (pill mode only)
     GtkWidget *title;
     GtkWidget *play; // play/pause label flips with status
     int last_x, last_y; // last gtk_fixed_move, to skip redundant moves
@@ -214,6 +215,127 @@ static gboolean viz_draw(GtkWidget *w, cairo_t *cr, gpointer data) {
 
 static gboolean tb_tick(gpointer data);
 
+// ---- VSCodium menubar ----
+//
+// While VSCodium holds the strip (pill mode), the empty space carries a
+// File/Edit/… menubar. Electron exports no global menu on wayland, so
+// the entries drive VSCodium through its default keybindings, delivered
+// with hyprland's sendshortcut dispatcher. Chords join with '+'.
+
+typedef struct {
+    const char *label;
+    const char *keys; // "MODS,key"; chord steps joined with '+'
+} VsItem;
+
+typedef struct {
+    const char *title;
+    VsItem items[12];
+} VsMenu;
+
+static const VsMenu vs_menus[] = {
+    {"File",
+     {{"New File", "CTRL,n"},
+      {"New Window", "CTRL SHIFT,n"},
+      {"Open File…", "CTRL,o"},
+      {"Open Folder…", "CTRL,k+CTRL,o"},
+      {"Save", "CTRL,s"},
+      {"Save As…", "CTRL SHIFT,s"},
+      {"Close Editor", "CTRL,w"},
+      {"Close Window", "CTRL SHIFT,w"},
+      {NULL, NULL}}},
+    {"Edit",
+     {{"Undo", "CTRL,z"},
+      {"Redo", "CTRL,y"},
+      {"Cut", "CTRL,x"},
+      {"Copy", "CTRL,c"},
+      {"Paste", "CTRL,v"},
+      {"Find", "CTRL,f"},
+      {"Replace", "CTRL,h"},
+      {"Find in Files", "CTRL SHIFT,f"},
+      {NULL, NULL}}},
+    {"Selection",
+     {{"Select All", "CTRL,a"},
+      {"Expand Selection", "SHIFT ALT,right"},
+      {"Shrink Selection", "SHIFT ALT,left"},
+      {"Copy Line Up", "SHIFT ALT,up"},
+      {"Copy Line Down", "SHIFT ALT,down"},
+      {"Add Cursor Above", "CTRL ALT,up"},
+      {"Add Cursor Below", "CTRL ALT,down"},
+      {NULL, NULL}}},
+    {"View",
+     {{"Command Palette…", "CTRL SHIFT,p"},
+      {"Explorer", "CTRL SHIFT,e"},
+      {"Source Control", "CTRL SHIFT,g"},
+      {"Extensions", "CTRL SHIFT,x"},
+      {"Toggle Sidebar", "CTRL,b"},
+      {"Toggle Panel", "CTRL,j"},
+      {NULL, NULL}}},
+    {"Go",
+     {{"Go to File…", "CTRL,p"},
+      {"Go to Symbol…", "CTRL SHIFT,o"},
+      {"Go to Line…", "CTRL,g"},
+      {"Go to Definition", ",F12"},
+      {"Back", "ALT,left"},
+      {"Forward", "ALT,right"},
+      {NULL, NULL}}},
+    {"Run",
+     {{"Start Debugging", ",F5"},
+      {"Run Without Debugging", "CTRL,F5"},
+      {"Stop Debugging", "SHIFT,F5"},
+      {"Restart Debugging", "CTRL SHIFT,F5"},
+      {"Toggle Breakpoint", ",F9"},
+      {NULL, NULL}}},
+    {"Terminal",
+     {{"New Terminal", "CTRL SHIFT,grave"},
+      {"Toggle Terminal", "CTRL,grave"},
+      {NULL, NULL}}},
+};
+
+// while one of our menus is open, hyprland's focus wanders to the popup;
+// the mode logic must not read that as "VSCodium lost focus"
+static gboolean tb_menu_open;
+
+static gboolean vs_menu_destroy(gpointer menu) {
+    gtk_widget_destroy(menu);
+    return G_SOURCE_REMOVE;
+}
+
+static void vs_menu_closed(GtkWidget *menu, gpointer data) {
+    (void)data;
+    tb_menu_open = FALSE;
+    g_idle_add(vs_menu_destroy, menu);
+}
+
+static void vs_item_cb(GtkMenuItem *item, gpointer data) {
+    (void)item;
+    const char *keys = data;
+    GString *cmd = g_string_new(NULL);
+    char **steps = g_strsplit(keys, "+", -1);
+    for (int i = 0; steps[i]; i++)
+        g_string_append_printf(
+            cmd, "%shyprctl dispatch sendshortcut '%s,class:codium'",
+            i ? "; sleep 0.08; " : "", steps[i]);
+    g_strfreev(steps);
+    spawn_cmd(cmd->str);
+    g_string_free(cmd, TRUE);
+}
+
+static void vs_menu_btn(GtkWidget *btn, gpointer data) {
+    const VsMenu *m = data;
+    GtkWidget *menu = gtk_menu_new();
+    for (int i = 0; m->items[i].label; i++) {
+        GtkWidget *it = gtk_menu_item_new_with_label(m->items[i].label);
+        g_signal_connect(it, "activate", G_CALLBACK(vs_item_cb),
+                         (gpointer)m->items[i].keys);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu), it);
+    }
+    g_signal_connect(menu, "deactivate", G_CALLBACK(vs_menu_closed), NULL);
+    tb_menu_open = TRUE;
+    gtk_widget_show_all(menu);
+    gtk_menu_popup_at_widget(GTK_MENU(menu), btn, GDK_GRAVITY_SOUTH_WEST,
+                             GDK_GRAVITY_NORTH_WEST, NULL);
+}
+
 // spectrum inside the pill: painted over the card's CSS background but
 // beneath its children (runs before child draw, returns FALSE)
 static gboolean tb_content_draw(GtkWidget *w, cairo_t *cr, gpointer data) {
@@ -372,6 +494,19 @@ static TbWin *tb_win_new(Bar *bar) {
     // children); the content packs straight into the slab — windowless
     // widgets whose margins are always honoured
     g_signal_connect(slab, "draw", G_CALLBACK(viz_draw), tw);
+    // VSCodium menubar at the strip's left, pill mode only
+    GtkWidget *mb = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    gtk_widget_set_name(mb, "vs-menubar");
+    for (guint mi = 0; mi < G_N_ELEMENTS(vs_menus); mi++) {
+        GtkWidget *b = gtk_button_new_with_label(vs_menus[mi].title);
+        gtk_button_set_relief(GTK_BUTTON(b), GTK_RELIEF_NONE);
+        g_signal_connect(b, "clicked", G_CALLBACK(vs_menu_btn),
+                         (gpointer)&vs_menus[mi]);
+        gtk_box_pack_start(GTK_BOX(mb), b, FALSE, FALSE, 0);
+    }
+    gtk_widget_set_no_show_all(mb, TRUE); // mode-controlled visibility
+    tw->menubar = mb;
+    gtk_box_pack_start(GTK_BOX(slab), mb, FALSE, FALSE, 0);
     tw->fix = gtk_fixed_new();
     gtk_widget_set_hexpand(tw->fix, TRUE);
     gtk_fixed_put(GTK_FIXED(tw->fix), box, 0, 0);
@@ -500,9 +635,14 @@ static void tw_apply_mode(TbWin *tw, gboolean pill) {
     if (pill) {
         gtk_style_context_add_class(ss, "empty");
         gtk_style_context_add_class(cs, "tb-pill");
+        // (show_all early-outs on a no-show-all widget: lift it briefly)
+        gtk_widget_set_no_show_all(tw->menubar, FALSE);
+        gtk_widget_show_all(tw->menubar); // the app's menus take over
+        gtk_widget_set_no_show_all(tw->menubar, TRUE);
     } else {
         gtk_style_context_remove_class(ss, "empty");
         gtk_style_context_remove_class(cs, "tb-pill");
+        gtk_widget_hide(tw->menubar);
     }
     tw_kick_anim(tw);
 }
@@ -516,9 +656,12 @@ static void tb_slab_sized(GtkWidget *w, GdkRectangle *alloc,
 
 // pill only while a matching app IS the focused window, and only on the
 // monitor holding it — focus anything else and every bar re-centres
+static void tb_apply_visibility(void); // defined with show/hide below
+
 static void tb_refocus_now(void) {
-    if (!tb_wins || !tb_wins->len)
+    if (tb_menu_open) // our own menu popup holds the focus right now
         return;
+    tb_sync_windows(); // codium alone can summon the bar: need windows
     char *win = NULL;
     g_spawn_command_line_sync("hyprctl activewindow -j", &win, NULL, NULL,
                               NULL);
@@ -569,6 +712,7 @@ static void tb_refocus_now(void) {
         tw_apply_mode(tw, *pill_mon &&
                               g_str_equal(tw->bar->hypr_name, pill_mon));
     }
+    tb_apply_visibility(); // a focused VSCodium can summon/dismiss it
 }
 
 static guint refocus_id;
@@ -586,36 +730,71 @@ void toolbar_refocus(void) {
         refocus_id = g_timeout_add(120, refocus_cb, NULL);
 }
 
-static gboolean tb_visible(void) {
-    for (guint i = 0; tb_wins && i < tb_wins->len; i++)
-        if (gtk_widget_get_visible(
-                ((TbWin *)g_ptr_array_index(tb_wins, i))->win))
-            return TRUE;
-    return FALSE;
-}
+static gboolean music_on; // yt music playing (or within the pause grace)
 
-static void tb_hide(void) {
-    if (grace_id) {
-        g_source_remove(grace_id);
-        grace_id = 0;
-    }
-    for (guint i = 0; tb_wins && i < tb_wins->len; i++) {
-        TbWin *tw = g_ptr_array_index(tb_wins, i);
+// one window on/off, with its chrome inset and morph housekeeping
+static void tw_set_shown(TbWin *tw, gboolean on) {
+    if (on) {
+        if (!gtk_widget_get_visible(tw->win)) {
+            gtk_widget_show_all(tw->win); // map → hyprland slides down
+            // menubar visibility is mode-managed, not show_all's call
+            if (tw->pill) {
+                gtk_widget_set_no_show_all(tw->menubar, FALSE);
+                gtk_widget_show_all(tw->menubar);
+                gtk_widget_set_no_show_all(tw->menubar, TRUE);
+            } else {
+                gtk_widget_hide(tw->menubar);
+            }
+        }
+        // the music row only exists when music drives the bar
+        gtk_widget_set_visible(tw->content, music_on);
+        if (tw->bar->tb_inset != TB_H) {
+            tw->bar->tb_inset = TB_H;
+            gtk_widget_queue_draw(tw->bar->frame);
+        }
+        tw_kick_anim(tw);
+    } else {
         if (gtk_widget_get_visible(tw->win))
             gtk_widget_hide(tw->win); // unmap → hyprland slides it up
         if (tw->bar->tb_inset) { // chrome hole grows back
             tw->bar->tb_inset = 0;
             gtk_widget_queue_draw(tw->bar->frame);
         }
-        // finish any morph instantly while hidden
-        if (tw->pill_anim) {
+        if (tw->pill_anim) { // finish any morph instantly while hidden
             g_source_remove(tw->pill_anim);
             tw->pill_anim = 0;
         }
         tw->pill_ext = tw->pill ? 1.0 : 0.0;
         tw_update_margin(tw);
     }
-    viz_stop();
+}
+
+// the visibility rule: music shows the bar on EVERY monitor (that
+// provider's exception); a focused VSCodium shows it on ITS monitor
+// (menubar only, unless music is also up)
+static void tb_apply_visibility(void) {
+    tb_sync_windows();
+    gboolean any = FALSE;
+    for (guint i = 0; tb_wins && i < tb_wins->len; i++) {
+        TbWin *tw = g_ptr_array_index(tb_wins, i);
+        gboolean want = music_on || tw->pill;
+        tw_set_shown(tw, want);
+        any = any || want;
+    }
+    if (music_on)
+        viz_start();
+    else
+        viz_stop();
+    (void)any;
+}
+
+static void tb_hide(void) { // music went away
+    if (grace_id) {
+        g_source_remove(grace_id);
+        grace_id = 0;
+    }
+    music_on = FALSE;
+    tb_apply_visibility();
 }
 
 static gboolean grace_expired(gpointer data) {
@@ -625,23 +804,10 @@ static gboolean grace_expired(gpointer data) {
     return G_SOURCE_REMOVE;
 }
 
-// YouTube Music's exception: the bar appears on EVERY monitor
-static void tb_show(void) {
-    tb_sync_windows();
-    for (guint i = 0; tb_wins && i < tb_wins->len; i++) {
-        TbWin *tw = g_ptr_array_index(tb_wins, i);
-        if (!gtk_widget_get_visible(tw->win))
-            gtk_widget_show_all(tw->win); // map → hyprland slides down
-        if (tw->bar->tb_inset != TB_H) { // chrome carves out the strip
-            tw->bar->tb_inset = TB_H;
-            gtk_widget_queue_draw(tw->bar->frame);
-        }
-    }
-    viz_start();
+static void tb_show(void) { // music is playing
+    music_on = TRUE;
+    tb_apply_visibility();
     tb_refocus_now(); // pick the right mode per monitor immediately
-    for (guint i = 0; tb_wins && i < tb_wins->len; i++)
-        tw_kick_anim(g_ptr_array_index(tb_wins, i)); // now that we're
-                                                     // mapped for real
 }
 
 // mpris player owned by the youtube-music desktop app, or NULL
@@ -709,7 +875,7 @@ static gboolean tb_tick(gpointer data) {
                     grace_id = 0;
                 }
                 tb_show();
-            } else if (tb_visible() && !grace_id) {
+            } else if (music_on && !grace_id) {
                 grace_id = g_timeout_add_seconds(TB_GRACE_S, grace_expired,
                                                  NULL);
             }
