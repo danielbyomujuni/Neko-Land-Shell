@@ -173,7 +173,8 @@ static gboolean frame_draw_cb(GtkWidget *w, cairo_t *cr, gpointer data) {
     // quickset corner morph: the chrome grows a glass corner out of the
     // sidebar at the bottom (same language as the launcher panel)
     if (bar->qs_ext > 0.001) {
-        double qw = bar->qs_ext * NEKO_LAUNCH_W;
+        double qw =
+            bar->qs_ext * (bar->qs_w > 0 ? bar->qs_w : NEKO_LAUNCH_W);
         double qh = bar->qs_h > 0 ? bar->qs_h : 150;
         double qx = lip;
         double qy = height - FRAME_W - qh;

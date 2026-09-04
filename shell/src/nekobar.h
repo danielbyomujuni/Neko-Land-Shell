@@ -42,6 +42,7 @@ typedef struct {
     guint qs_tick;
     gint64 qs_last_us;
     int qs_h;                   // quickset panel height (for the chrome)
+    int qs_w;                   // quickset panel width (for the chrome)
     GtkWidget *qs_popover;   // quick settings popover
     GtkWidget *qs_scale;
     GtkWidget *qs_mute_label;

@@ -13,3 +13,6 @@ GtkWidget *rgb_page_new(void);
 
 // displays.c — monitors via hyprctl + Lua config
 GtkWidget *displays_page_new(void);
+
+// wallpaper.c — hyprpaper-backed wallpaper picker
+GtkWidget *wallpaper_page_new(void);

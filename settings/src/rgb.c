@@ -14,8 +14,6 @@
 
 #include <string.h>
 
-GPtrArray *rgb_claimed_locations;
-
 static const RgbProvider *providers[] = {
     &rgb_ene_provider,
     &rgb_hue2_provider,
@@ -27,33 +25,8 @@ static const RgbProvider *providers[] = {
     NULL,
 };
 
-RgbDevice *rgb_device_new(const RgbProvider *p, const char *id,
-                          const char *name, const char *type) {
-    RgbDevice *d = g_new0(RgbDevice, 1);
-    d->provider = p;
-    d->id = g_strdup(id);
-    d->name = g_strdup(name);
-    d->type = g_strdup(type);
-    d->cur_mode = -1;
-    d->color = (GdkRGBA){1.0, 0.0, 0.0, 1.0}; // saturated red
-    d->brightness = 1.0;
-    d->speed = 40;
-    d->has_speed = TRUE;
-    d->enabled = TRUE;
-    for (int i = 0; i < RGB_MAX_LEDS; i++)
-        d->led_colors[i] = d->color;
-    return d;
-}
-
-void rgb_device_free(gpointer p) {
-    RgbDevice *d = p;
-    g_free(d->id);
-    g_free(d->name);
-    g_free(d->type);
-    if (d->modes)
-        g_ptr_array_free(d->modes, TRUE);
-    g_free(d);
-}
+// rgb_device_new/free + rgb_claimed_locations live in rgb_common.c,
+// shared with the headless nekoland-rgb-restore binary
 
 // saturated palette: catppuccin pastels render near-white on LEDs, so the
 // dots carry fully saturated hues that look on-hardware like they do here
@@ -183,7 +156,123 @@ static gboolean mode_is_static(const char *mode) {
            !g_ascii_strcasecmp(mode, "Direct");
 }
 
+// ---- live state (rgb-state.ini) ----
+//
+// every change that reaches the hardware is also written (debounced) to
+// ~/.config/nekoland/rgb-state.ini, one group per device id:
+//   state = <mode>|<#hex>|<brightness>|<speed>|<enabled>
+//   leds  = <#hex>;<#hex>;…            (per-LED-capable devices only)
+// The settings app reads it back after a scan so the UI remembers the
+// last setup, and nekoland-rgb-restore reapplies it at login.
+
+static char *state_path(void) {
+    return g_build_filename(g_get_user_config_dir(), "nekoland",
+                            "rgb-state.ini", NULL);
+}
+
+static char *device_state_string(RgbDevice *d) {
+    char hex[10];
+    g_snprintf(hex, sizeof(hex), "#%02X%02X%02X",
+               (int)(d->color.red * 255 + 0.5),
+               (int)(d->color.green * 255 + 0.5),
+               (int)(d->color.blue * 255 + 0.5));
+    char bright[G_ASCII_DTOSTR_BUF_SIZE];
+    g_ascii_dtostr(bright, sizeof(bright), d->brightness);
+    return g_strdup_printf("%s|%s|%s|%d|%d", device_mode_name(d), hex,
+                           bright, d->speed, d->enabled ? 1 : 0);
+}
+
+static guint state_save_id;
+
+static gboolean state_save_now(gpointer data) {
+    (void)data;
+    state_save_id = 0;
+    GKeyFile *kf = g_key_file_new();
+    if (active_profile)
+        g_key_file_set_string(kf, "meta", "active-profile", active_profile);
+    for (guint i = 0; devices && i < devices->len; i++) {
+        RgbDevice *d = g_ptr_array_index(devices, i);
+        char *val = device_state_string(d);
+        g_key_file_set_string(kf, d->id, "state", val);
+        // hidraw numbers shift across reboots: the name lets
+        // nekoland-rgb-restore re-match devices whose id moved
+        g_key_file_set_string(kf, d->id, "name", d->name);
+        g_free(val);
+        if (d->n_leds > 0) {
+            GString *s = g_string_new(NULL);
+            for (int l = 0; l < d->n_leds && l < RGB_MAX_LEDS; l++)
+                g_string_append_printf(
+                    s, "%s#%02X%02X%02X", l ? ";" : "",
+                    (int)(d->led_colors[l].red * 255 + 0.5),
+                    (int)(d->led_colors[l].green * 255 + 0.5),
+                    (int)(d->led_colors[l].blue * 255 + 0.5));
+            g_key_file_set_string(kf, d->id, "leds", s->str);
+            g_string_free(s, TRUE);
+        }
+    }
+    char *path = state_path();
+    char *dir = g_path_get_dirname(path);
+    g_mkdir_with_parents(dir, 0755);
+    g_key_file_save_to_file(kf, path, NULL);
+    g_free(dir);
+    g_free(path);
+    g_key_file_free(kf);
+    return G_SOURCE_REMOVE;
+}
+
+static void state_save_soon(void) {
+    if (!state_save_id)
+        state_save_id = g_timeout_add(400, state_save_now, NULL);
+}
+
+// after a scan: pull the remembered setup back into the device structs so
+// the UI shows what was last configured (hardware is left untouched — it
+// already carries this state, restored at login by nekoland-rgb-restore)
+static void state_load_into_devices(void) {
+    GKeyFile *kf = g_key_file_new();
+    char *path = state_path();
+    gboolean ok = g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL);
+    g_free(path);
+    if (!ok) {
+        g_key_file_free(kf);
+        return;
+    }
+    for (guint i = 0; devices && i < devices->len; i++) {
+        RgbDevice *d = g_ptr_array_index(devices, i);
+        char *val = g_key_file_get_string(kf, d->id, "state", NULL);
+        if (val) {
+            char **f = g_strsplit(val, "|", 5);
+            if (g_strv_length(f) == 5) {
+                int m = find_mode(d, f[0]);
+                if (m >= 0)
+                    d->cur_mode = m;
+                gdk_rgba_parse(&d->color, f[1]);
+                d->brightness = g_ascii_strtod(f[2], NULL);
+                d->speed = atoi(f[3]);
+                d->enabled = g_str_equal(f[4], "1");
+            }
+            g_strfreev(f);
+            g_free(val);
+        }
+        char *leds = g_key_file_get_string(kf, d->id, "leds", NULL);
+        if (leds && d->n_leds > 0) {
+            char **c = g_strsplit(leds, ";", -1);
+            for (int l = 0; c[l] && l < d->n_leds && l < RGB_MAX_LEDS; l++)
+                gdk_rgba_parse(&d->led_colors[l], c[l]);
+            g_strfreev(c);
+        }
+        g_free(leds);
+    }
+    char *prof = g_key_file_get_string(kf, "meta", "active-profile", NULL);
+    if (prof) {
+        g_free(active_profile);
+        active_profile = prof;
+    }
+    g_key_file_free(kf);
+}
+
 static void apply_device(RgbDevice *d) {
+    state_save_soon(); // remember every change that reaches the hardware
     if (!d->enabled) {
         int off = find_mode(d, "Off");
         if (off >= 0) {
@@ -557,6 +646,7 @@ static void on_led_clicked(GtkWidget *b, gpointer data) {
     int st = find_mode(d, "Static");
     if (st >= 0)
         d->cur_mode = st;
+    state_save_soon();
     gtk_widget_queue_draw(lc->area);
     rebuild_chips(); // chip swatches pick up the change
     if (bars_box)
@@ -1082,6 +1172,7 @@ static void profile_save_current(void) {
     g_key_file_free(kf);
     g_free(active_profile);
     active_profile = g_strdup(name);
+    state_save_soon(); // remember which profile is active
     rebuild_profiles();
 }
 
@@ -1093,6 +1184,7 @@ static void profile_delete_active(void) {
     profiles_store(kf);
     g_key_file_free(kf);
     g_clear_pointer(&active_profile, g_free);
+    state_save_soon();
     rebuild_profiles();
 }
 
@@ -1695,6 +1787,7 @@ static void scan_done(GObject *src, GAsyncResult *res, gpointer data) {
         RgbDevice *d = g_ptr_array_index(devices, i);
         d->enabled = g_ascii_strcasecmp(device_mode_name(d), "Off") != 0;
     }
+    state_load_into_devices(); // remembered setup wins over the heuristic
     rebuild_groups();
     selected = groups->len ? g_ptr_array_index(groups, 0) : NULL;
     rebuild_chips();

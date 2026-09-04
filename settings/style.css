@@ -579,3 +579,22 @@ window#adv-modal {
 .tear-dot-3 { background: #f38ba8; }
 .tear-dot-4 { background: #a6e3a1; }
 .tear-dot-5 { background: #b4befe; }
+
+/* wallpaper page */
+.wp-thumb {
+  padding: 2px;
+  background: none;
+  border: 2px solid transparent;
+  border-radius: 12px;
+  min-width: 0;
+  min-height: 0;
+}
+.wp-thumb:hover {
+  border-color: #45475a;
+}
+.wp-thumb.sel {
+  border-color: #89b4fa;
+}
+.wp-pic {
+  border-radius: 8px;
+}

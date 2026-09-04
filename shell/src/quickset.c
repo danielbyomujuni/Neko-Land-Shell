@@ -131,6 +131,133 @@ static void on_out_btn(GtkWidget *btn, gpointer data) {
     gtk_revealer_set_reveal_child(rev, open);
 }
 
+// ---- input monitoring ----
+//
+// direct monitoring of the audio interface's inputs: a module-loopback
+// per source routes it into the default output at low latency. State
+// lives in pipewire itself (the loaded modules), so the switches always
+// reflect reality even across bar restarts.
+
+static GHashTable *load_hidden(void); // defined with the sink picker
+
+// id of the loopback module feeding from a source, 0 when none runs
+static guint loopback_module_for(const char *src) {
+    char *out = NULL;
+    guint id = 0;
+    if (!g_spawn_command_line_sync("pactl list modules short", &out, NULL,
+                                   NULL, NULL) ||
+        !out)
+        return 0;
+    char *needle = g_strdup_printf("source=%s", src);
+    gsize nl = strlen(needle);
+    char **lines = g_strsplit(out, "\n", -1);
+    for (int i = 0; lines[i] && !id; i++) {
+        if (!strstr(lines[i], "module-loopback"))
+            continue;
+        char *pos = strstr(lines[i], needle);
+        if (pos && (pos[nl] == ' ' || pos[nl] == '\t' || pos[nl] == '\0'))
+            id = (guint)atoi(lines[i]);
+    }
+    g_strfreev(lines);
+    g_free(needle);
+    g_free(out);
+    return id;
+}
+
+static gboolean on_mon_switch(GtkSwitch *sw, gboolean state, gpointer data) {
+    (void)sw;
+    const char *src = data;
+    if (state) {
+        if (!loopback_module_for(src)) {
+            char *cmd = g_strdup_printf(
+                "pactl load-module module-loopback source=%s latency_msec=5",
+                src);
+            g_spawn_command_line_sync(cmd, NULL, NULL, NULL, NULL);
+            g_free(cmd);
+        }
+    } else {
+        guint id = loopback_module_for(src);
+        if (id) {
+            char *cmd = g_strdup_printf("pactl unload-module %u", id);
+            g_spawn_command_line_sync(cmd, NULL, NULL, NULL, NULL);
+            g_free(cmd);
+        }
+    }
+    return FALSE; // let the switch flip
+}
+
+static void mon_src_free(gpointer data, GClosure *closure) {
+    (void)closure;
+    g_free(data);
+}
+
+// one row per hardware capture source (alsa_input.*)
+static void rebuild_monitors(Bar *bar) {
+    GtkWidget *box =
+        g_object_get_data(G_OBJECT(bar->qs_popover), "mon-box");
+    if (!box)
+        return;
+    GList *kids = gtk_container_get_children(GTK_CONTAINER(box));
+    for (GList *l = kids; l; l = l->next)
+        gtk_widget_destroy(GTK_WIDGET(l->data));
+    g_list_free(kids);
+
+    char *out = NULL;
+    if (!g_spawn_command_line_sync("pactl --format=json list sources", &out,
+                                   NULL, NULL, NULL) ||
+        !out)
+        return;
+    GHashTable *hidden = load_hidden(); // Sound → Advanced hides sources too
+    JsonParser *p = json_parser_new();
+    if (json_parser_load_from_data(p, out, -1, NULL)) {
+        JsonArray *arr = json_node_get_array(json_parser_get_root(p));
+        for (guint i = 0; i < json_array_get_length(arr); i++) {
+            JsonObject *o = json_array_get_object_element(arr, i);
+            const char *name = json_object_get_string_member(o, "name");
+            const char *desc =
+                json_object_get_string_member(o, "description");
+            if (!name || !g_str_has_prefix(name, "alsa_input.") ||
+                g_hash_table_contains(hidden, name))
+                continue;
+            GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+            GtkWidget *lbl = gtk_label_new(desc ? desc : name);
+            gtk_label_set_xalign(GTK_LABEL(lbl), 0.0);
+            gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_END);
+            gtk_label_set_max_width_chars(GTK_LABEL(lbl), 30);
+            // NO hexpand here: the property propagates up to the panel's
+            // column and re-centers the whole card mid-surface; box pack
+            // expansion below does the same job without propagating
+            gtk_widget_set_name(lbl, "qs-mon-label");
+            gtk_box_pack_start(GTK_BOX(row), lbl, TRUE, TRUE, 0);
+            GtkWidget *sw = gtk_switch_new();
+            gtk_widget_set_valign(sw, GTK_ALIGN_CENTER);
+            gtk_switch_set_active(GTK_SWITCH(sw),
+                                  loopback_module_for(name) != 0);
+            g_signal_connect_data(sw, "state-set",
+                                  G_CALLBACK(on_mon_switch),
+                                  g_strdup(name), mon_src_free, 0);
+            gtk_box_pack_end(GTK_BOX(row), sw, FALSE, FALSE, 0);
+            gtk_box_pack_start(GTK_BOX(box), row, FALSE, FALSE, 0);
+        }
+    }
+    g_hash_table_destroy(hidden);
+    g_object_unref(p);
+    g_free(out);
+    gtk_widget_show_all(box);
+}
+
+// circle mic button: expands the input-monitoring section
+static void on_mon_btn(GtkWidget *btn, gpointer data) {
+    (void)btn;
+    Bar *bar = data;
+    GtkRevealer *rev = g_object_get_data(G_OBJECT(bar->qs_popover),
+                                         "mon-revealer");
+    gboolean open = !gtk_revealer_get_reveal_child(rev);
+    if (open)
+        rebuild_monitors(bar);
+    gtk_revealer_set_reveal_child(rev, open);
+}
+
 static gboolean volcap_scroll(GtkWidget *w, GdkEventScroll *ev,
                               gpointer data) {
     (void)w;
@@ -337,6 +464,14 @@ void quickset_sync(void) {
 
 static gboolean qs_click_off(Bar *bar); // defined with the morph code
 
+// gear button: open the full settings app and retract the panel
+static void on_settings_btn(GtkWidget *btn, gpointer data) {
+    (void)btn;
+    (void)data;
+    spawn_cmd("gtk-launch nekoland-settings");
+    quickset_autoclose();
+}
+
 // concave glass fillets where the panel's rims tee into the sidebar and
 // the bottom border — drawn on THIS surface so the frost matches the
 // panel glass exactly (blur is per-surface)
@@ -383,8 +518,9 @@ static void qs_frame_sized(GtkWidget *w, GdkRectangle *alloc,
                            gpointer data) {
     (void)w;
     Bar *bar = data;
-    if (bar->qs_h != alloc->height) {
+    if (bar->qs_h != alloc->height || bar->qs_w != alloc->width) {
         bar->qs_h = alloc->height;
+        bar->qs_w = alloc->width;
         gtk_widget_queue_draw(bar->frame);
     }
 }
@@ -495,6 +631,22 @@ void quickset_attach(Bar *bar, GtkWidget *anchor) {
     gtk_widget_set_valign(outbtn, GTK_ALIGN_CENTER);
     g_signal_connect(outbtn, "clicked", G_CALLBACK(on_out_btn), bar);
     gtk_box_pack_start(GTK_BOX(volrow), outbtn, FALSE, FALSE, 0);
+    GtkWidget *monbtn = gtk_button_new_with_label("\U000F036C");
+    gtk_button_set_relief(GTK_BUTTON(monbtn), GTK_RELIEF_NONE);
+    gtk_widget_set_name(monbtn, "qs-out-btn"); // same round-button style
+    gtk_widget_set_size_request(monbtn, 30, 30);
+    gtk_widget_set_valign(monbtn, GTK_ALIGN_CENTER);
+    gtk_widget_set_tooltip_text(monbtn, "Input monitoring");
+    g_signal_connect(monbtn, "clicked", G_CALLBACK(on_mon_btn), bar);
+    gtk_box_pack_start(GTK_BOX(volrow), monbtn, FALSE, FALSE, 0);
+    GtkWidget *setbtn = gtk_button_new_with_label("\U000F0493");
+    gtk_button_set_relief(GTK_BUTTON(setbtn), GTK_RELIEF_NONE);
+    gtk_widget_set_name(setbtn, "qs-out-btn"); // same round-button style
+    gtk_widget_set_size_request(setbtn, 30, 30);
+    gtk_widget_set_valign(setbtn, GTK_ALIGN_CENTER);
+    gtk_widget_set_tooltip_text(setbtn, "All settings");
+    g_signal_connect(setbtn, "clicked", G_CALLBACK(on_settings_btn), bar);
+    gtk_box_pack_start(GTK_BOX(volrow), setbtn, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(v), volrow, FALSE, FALSE, 0);
 
     // output picker, collapsed until the circle button opens it
@@ -517,6 +669,28 @@ void quickset_attach(Bar *bar, GtkWidget *anchor) {
     gtk_box_pack_start(GTK_BOX(outv), bar->qs_sink_box, FALSE, FALSE, 0);
     gtk_container_add(GTK_CONTAINER(rev), outv);
     gtk_box_pack_start(GTK_BOX(v), rev, FALSE, FALSE, 0);
+
+    // input monitoring, collapsed until the mic button opens it
+    GtkWidget *mrev = gtk_revealer_new();
+    gtk_revealer_set_transition_type(GTK_REVEALER(mrev),
+                                     GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
+    gtk_revealer_set_transition_duration(GTK_REVEALER(mrev), 200);
+    g_object_set_data(G_OBJECT(win), "mon-revealer", mrev);
+    GtkWidget *mv = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+
+    GtkWidget *msep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_box_pack_start(GTK_BOX(mv), msep, FALSE, FALSE, 2);
+
+    GtkWidget *mhdr = gtk_label_new("Input monitoring");
+    gtk_label_set_xalign(GTK_LABEL(mhdr), 0.0);
+    gtk_widget_set_name(mhdr, "qs-header");
+    gtk_box_pack_start(GTK_BOX(mv), mhdr, FALSE, FALSE, 0);
+
+    GtkWidget *mbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    g_object_set_data(G_OBJECT(win), "mon-box", mbox);
+    gtk_box_pack_start(GTK_BOX(mv), mbox, FALSE, FALSE, 0);
+    gtk_container_add(GTK_CONTAINER(mrev), mv);
+    gtk_box_pack_start(GTK_BOX(v), mrev, FALSE, FALSE, 0);
 }
 
 static gint64 qs_last_autoclose_us;
@@ -589,6 +763,14 @@ void quickset_toggle(Bar *bar) {
                                              "out-revealer");
         if (rev)
             gtk_revealer_set_reveal_child(rev, FALSE);
+        GtkRevealer *mrev = g_object_get_data(G_OBJECT(bar->qs_popover),
+                                              "mon-revealer");
+        if (mrev) { // NEKOBAR_QS_TEST opens the monitoring list for debug
+            gboolean test = g_getenv("NEKOBAR_QS_TEST") != NULL;
+            if (test)
+                rebuild_monitors(bar);
+            gtk_revealer_set_reveal_child(mrev, test);
+        }
         qs_animate(bar, 1);
     }
 }

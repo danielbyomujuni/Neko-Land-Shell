@@ -157,6 +157,8 @@ static void activate(AdwApplication *app, gpointer data) {
     add_category("rgb", "RGB", "󰆋", "icon-purple", rgb_page_new());
     add_category("displays", "Displays", "\xf3\xb0\x8d\xb9", "icon-blue",
                  displays_page_new());
+    add_category("wallpaper", "Wallpaper", "\xf3\xb0\x8b\xa9", "icon-green",
+                 wallpaper_page_new());
     // initial page: first category, or NEKOLAND_PAGE=<id> override
     const char *want = g_getenv("NEKOLAND_PAGE");
     GtkListBoxRow *initial =
