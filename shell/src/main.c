@@ -236,6 +236,11 @@ static gboolean ws_scrolled(GtkWidget *w, GdkEventScroll *ev,
     return TRUE;
 }
 
+static void center_child(GtkWidget *child, gpointer data) {
+    (void)data;
+    gtk_widget_set_halign(child, GTK_ALIGN_CENTER);
+}
+
 static Bar *bar_new(GdkMonitor *gdk_mon) {
     Bar *bar = g_new0(Bar, 1);
 
@@ -358,6 +363,10 @@ static Bar *bar_new(GdkMonitor *gdk_mon) {
     bar->mem_label = gtk_label_new("");
     gtk_widget_set_name(bar->mem_label, "memory");
     gtk_box_pack_end(GTK_BOX(box), bar->mem_label, FALSE, FALSE, 0);
+
+    // every module is centered in the bar's width — no per-widget drift
+    gtk_container_foreach(GTK_CONTAINER(box), center_child, NULL);
+    gtk_container_foreach(GTK_CONTAINER(left), center_child, NULL);
 
     g_signal_connect_swapped(GTK_WIDGET(win), "size-allocate",
                              G_CALLBACK(gtk_widget_queue_draw), bar->frame);

@@ -17,7 +17,9 @@ window#nekobar {
   background: none;
   border: none;
   margin: 0;
-  padding: 4pt 2pt;
+  /* left padding exceeds right by the chrome lip width (5px) so widgets
+     center in the VISIBLE column (bar + lip), not just the bar surface */
+  padding: 6px 3px 6px 8px;
 }
 
 /* flat icon buttons */
@@ -36,8 +38,8 @@ window#nekobar {
 }
 
 #rofi {
-  margin-top: 7pt;
-  padding-bottom: 3pt;
+  margin-top: 6pt;
+  padding: 0;
   font-size: 12pt;
 }
 #rofi * { font-size: 12pt; }
@@ -46,8 +48,8 @@ window#nekobar {
   background: #181825;
   border: solid 1px #1e1e2e;
   border-radius: 7pt;
-  margin: 10pt 4pt 0 4pt;
-  padding: 5pt 0;
+  margin: 10pt 0 0 0;
+  padding: 5pt 4pt;
 }
 #workspaces button {
   background: #45475a;
@@ -80,8 +82,8 @@ window#nekobar {
   border: none;
   box-shadow: none;
   border-radius: 12pt;
-  margin-top: 15pt;
-  padding: 8pt 0;
+  margin-top: 14pt;
+  padding: 8pt 2pt;
   min-height: 0;
 }
 #mpris * { color: #a6e3a1; }
@@ -93,7 +95,7 @@ window#nekobar {
 
 #memory {
   color: #fab387;
-  margin-bottom: 12pt;
+  margin-bottom: 10pt;
 }
 
 #tray {
@@ -178,22 +180,22 @@ menu check {
 #pulseaudio * { color: #74c7ec; }
 
 #color-picker {
-  margin-bottom: 14pt;
+  margin-bottom: 10pt;
 }
 #color-picker * { font-size: 9pt; }
 
 #screenshot {
-  margin-bottom: 14pt;
+  margin-bottom: 10pt;
 }
 #screenshot * { font-size: 10pt; }
 
 #wallpaper {
-  margin-bottom: 12pt;
+  margin-bottom: 10pt;
 }
 #wallpaper * { font-size: 12pt; }
 
 #power {
-  margin-bottom: 9pt;
+  margin-bottom: 7pt;
 }
 #power * { font-size: 10pt; }
 
@@ -207,7 +209,7 @@ menu check {
 }
 
 #clock {
-  margin-bottom: 8pt;
+  margin-bottom: 10pt;
 }
 
 /* built-in app launcher panel */
