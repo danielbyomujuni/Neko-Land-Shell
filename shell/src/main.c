@@ -460,6 +460,7 @@ static Bar *bar_new(GdkMonitor *gdk_mon) {
     g_signal_connect(vol_ev, "button-press-event", G_CALLBACK(vol_pressed), bar);
     g_signal_connect(vol_ev, "scroll-event", G_CALLBACK(vol_scrolled), NULL);
     gtk_box_pack_end(GTK_BOX(box), vol_ev, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(box), vr_widget_new(bar), FALSE, FALSE, 0);
     quickset_attach(bar, vol_ev);
     launcher_attach(bar);
 
@@ -610,6 +611,7 @@ int main(int argc, char **argv) {
     hypr_refresh_title();
     tray_init();
     modules_start();
+    vr_start();
 
     // e.g. `pkill -USR1 nekobar` from a Hyprland keybind
     g_unix_signal_add(SIGUSR1, on_sigusr1, NULL);

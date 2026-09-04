@@ -4,7 +4,7 @@ CFLAGS += $(shell pkg-config --cflags $(PKGS))
 LDLIBS = $(shell pkg-config --libs $(PKGS)) -lm
 
 SRC = src/main.c src/hypr.c src/modules.c src/tray.c src/quickset.c \
-      src/launcher.c src/osd.c
+      src/launcher.c src/osd.c src/vr.c
 OBJ = $(SRC:.c=.o)
 
 nekobar: $(OBJ)

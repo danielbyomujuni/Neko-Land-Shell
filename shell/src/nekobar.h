@@ -25,6 +25,7 @@ typedef struct {
     GtkWidget *clock_label;
     GtkWidget *clock_area;   // analog dial above the digits
     GtkWidget *clock_ampm;   // small am/pm tag under the digits
+    GtkWidget *vr_btn;       // SteamVR status/launch button
     GtkWidget *mem_label;
     GtkWidget *vol_label;
     GtkWidget *launcher;        // app-grid panel (launcher.c)
@@ -86,6 +87,10 @@ void launcher_autoclose(void); // close open launchers (focus moved away)
 
 // osd.c — macOS-style volume popup on the focused monitor
 void osd_volume_show(void);
+
+// vr.c — SteamVR sidebar widget
+GtkWidget *vr_widget_new(Bar *bar);
+void vr_start(void); // status poll timer
 
 // quickset.c — quick settings popover (volume + output picker)
 void quickset_attach(Bar *bar, GtkWidget *anchor);
