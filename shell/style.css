@@ -404,14 +404,12 @@ window#toolbar {
   background: none;
 }
 #toolbar-box {
-  /* opaque slab in the chrome colour; the edge below is the frame's own
-     hole rim + inset shadow (the chrome carves out tb_inset), so the
-     toolbar reads as part of the shell, not a floating bar. No vertical
-     padding: the content box is valign-centred in the fixed-height slab */
-  background: #11111b;
-  border: none;
-  /* the 5px frame border above merges visually with the slab, so centre
+  /* the slab background is cairo-painted in viz_draw (it fades with the
+     pill morph and must sit UNDER the spectrum); CSS stays transparent.
+     The 5px frame border above merges visually with the slab, so centre
      the content in the FULL visible strip: bottom padding = border width */
+  background: none;
+  border: none;
   padding: 0 14px 5px 14px;
 }
 #tb-icon {
@@ -437,4 +435,21 @@ window#toolbar {
 }
 #toolbar-box button:hover label {
   color: #89b4fa;
+}
+
+/* toolbar app-focused mode: strip empties, controls morph into a pill.
+   Colours cross-fade here; the slide + visualizer squeeze are animated
+   in toolbar.c (pill_ext tick) */
+/* (slab bg + its pill-mode fade are cairo-painted in viz_draw) */
+.tb-content {
+  /* card BACKGROUND is cairo-painted (tb_content_draw) so the spectrum
+     can sit between it and the text; only the border lives here */
+  background: none;
+  border: solid 2px rgba(30, 30, 46, 0);
+  border-radius: 14px;
+  padding: 1px 12px;
+  transition: border-color 280ms ease;
+}
+.tb-content.tb-pill {
+  border-color: #1e1e2e;
 }

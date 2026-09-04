@@ -13,6 +13,7 @@
 #include "nekobar.h"
 
 #include <gtk-layer-shell/gtk-layer-shell.h>
+#include <json-glib/json-glib.h>
 #include <signal.h>
 #include <string.h>
 
@@ -25,14 +26,24 @@
 typedef struct {
     Bar *bar;
     GtkWidget *win;
+    GtkWidget *slab;    // full-width strip container
+    GtkWidget *content; // icon/title/controls row
+    GtkWidget *fix;  // GtkFixed: content placed at explicit coordinates
     GtkWidget *title;
     GtkWidget *play; // play/pause label flips with status
-    GtkWidget *viz;  // spectrum drawing area behind the content
+    int last_x, last_y; // last gtk_fixed_move, to skip redundant moves
+    gboolean pill;   // compact right-side pill (app-focused mode)
+    double pill_ext; // 0 = full-width bar … 1 = right-side pill
+    guint pill_anim; // frame-clock tick id while morphing
+    gint64 pill_last_us;
 } TbWin;
 
 static GPtrArray *tb_wins; // TbWin*
 static char tb_player[128];
 static guint grace_id;
+
+static void tb_slab_sized(GtkWidget *w, GdkRectangle *alloc,
+                          gpointer data); // defined with the pill morph
 
 // ---- audio visualizer (cava raw ascii → bars behind the content) ----
 
@@ -43,11 +54,15 @@ static GPid viz_pid;
 static guint viz_watch;
 static GIOChannel *viz_ch;
 
+static void tw_update_margin(TbWin *tw);
+
 static void viz_queue_draws(void) {
     for (guint i = 0; tb_wins && i < tb_wins->len; i++) {
         TbWin *tw = g_ptr_array_index(tb_wins, i);
-        if (tw->viz)
-            gtk_widget_queue_draw(tw->viz);
+        if (tw->slab)
+            gtk_widget_queue_draw(tw->slab);
+        if (!tw->pill_anim) // keep position synced (dedup'd, so cheap)
+            tw_update_margin(tw);
     }
 }
 
@@ -129,34 +144,119 @@ static void viz_stop(void) {
 }
 
 // subtle sapphire capsules rising from the strip's bottom edge — same
-// rounded-pill language as the workspace dots
+// rounded-pill language as the workspace dots. As the bar morphs into
+// the app-focused pill, the spectrum compresses INTO the pill: the bars
+// re-span the shrinking region and are clipped to its rounded card.
+// Drawn by the SLAB's own draw handler (before its children) — no
+// overlay, no child GdkWindows (those broke repositioning on remap).
 static gboolean viz_draw(GtkWidget *w, cairo_t *cr, gpointer data) {
-    (void)data;
+    TbWin *tw = data;
     double W = gtk_widget_get_allocated_width(w);
     double H = gtk_widget_get_allocated_height(w);
-    double pitch = W / VIZ_BARS;
+    double rx = 0, rw = W, ry = 0, rh = H;
+    double e = tw ? tw->pill_ext : 0.0;
+    // slab background (cairo, not CSS — CSS paints over this handler):
+    // fades out as the strip empties into pill mode
+    cairo_set_source_rgba(cr, 0x11 / 255.0, 0x11 / 255.0, 0x1B / 255.0,
+                          1.0 - e);
+    cairo_paint(cr);
+    if (e > 0.001 && tw->content &&
+        gtk_widget_get_mapped(tw->content)) {
+        int px = 0, py = 0;
+        if (gtk_widget_translate_coordinates(tw->content, w, 0, 0, &px,
+                                             &py)) {
+            double pw = gtk_widget_get_allocated_width(tw->content);
+            double ph = gtk_widget_get_allocated_height(tw->content);
+            rx = px * e;
+            ry = py * e;
+            rw = W + (pw - W) * e;
+            rh = H + (ph - H) * e;
+            double cr_r = 13.0 * e;
+            cairo_new_sub_path(cr); // rounded clip = the pill card
+            cairo_arc(cr, rx + rw - cr_r, ry + cr_r, cr_r, -G_PI / 2, 0);
+            cairo_arc(cr, rx + rw - cr_r, ry + rh - cr_r, cr_r, 0,
+                      G_PI / 2);
+            cairo_arc(cr, rx + cr_r, ry + rh - cr_r, cr_r, G_PI / 2,
+                      G_PI);
+            cairo_arc(cr, rx + cr_r, ry + cr_r, cr_r, G_PI,
+                      3 * G_PI / 2);
+            cairo_close_path(cr);
+            cairo_clip(cr);
+        }
+    }
+    double pitch = rw / VIZ_BARS;
     double barw = pitch * 0.62;
+    // fade out as the bars converge on the pill — the pill's own card
+    // bars (tb_content_draw) fade in to take over
     cairo_set_source_rgba(cr, 0x74 / 255.0, 0xc7 / 255.0, 0xec / 255.0,
-                          0.30);
+                          0.30 * (1.0 - e));
+    double bottom = ry + rh;
     for (int i = 0; i < VIZ_BARS; i++) {
-        double h = MAX(viz_vals[i] * (H - 2), 0.0);
+        double h = MAX(viz_vals[i] * (rh - 2), 0.0);
         if (h < 1.5)
             continue;
-        double x = i * pitch + (pitch - barw) / 2;
+        double x = rx + i * pitch + (pitch - barw) / 2;
         double r = MIN(barw / 2, h / 2);
-        double y = H - h;
+        double y = bottom - h;
         cairo_new_sub_path(cr);
         cairo_arc(cr, x + barw - r, y + r, r, -G_PI / 2, 0);
-        cairo_line_to(cr, x + barw, H);
-        cairo_line_to(cr, x, H);
+        cairo_line_to(cr, x + barw, bottom);
+        cairo_line_to(cr, x, bottom);
         cairo_arc(cr, x + r, y + r, r, G_PI, 3 * G_PI / 2);
         cairo_close_path(cr);
     }
     cairo_fill(cr);
-    return TRUE;
+    return FALSE; // children (the content card) draw on top
 }
 
 static gboolean tb_tick(gpointer data);
+
+// spectrum inside the pill: painted over the card's CSS background but
+// beneath its children (runs before child draw, returns FALSE)
+static gboolean tb_content_draw(GtkWidget *w, cairo_t *cr, gpointer data) {
+    TbWin *tw = data;
+    double e = tw->pill_ext;
+    if (e < 0.02)
+        return FALSE;
+    double W = gtk_widget_get_allocated_width(w);
+    double H = gtk_widget_get_allocated_height(w);
+    double r = 13;
+    cairo_save(cr);
+    cairo_new_sub_path(cr);
+    cairo_arc(cr, W - r, r, r, -G_PI / 2, 0);
+    cairo_arc(cr, W - r, H - r, r, 0, G_PI / 2);
+    cairo_arc(cr, r, H - r, r, G_PI / 2, G_PI);
+    cairo_arc(cr, r, r, r, G_PI, 3 * G_PI / 2);
+    cairo_close_path(cr);
+    cairo_clip(cr);
+    // the card background is painted HERE (not CSS): default draw runs
+    // after this handler and would cover the bars otherwise
+    cairo_set_source_rgba(cr, 0x18 / 255.0, 0x18 / 255.0, 0x25 / 255.0,
+                          e);
+    cairo_paint(cr);
+    int step = VIZ_BARS / 48; // coarser sampling for the small card
+    double pitch = W / 48.0;
+    double barw = pitch * 0.62;
+    cairo_set_source_rgba(cr, 0x74 / 255.0, 0xc7 / 255.0, 0xec / 255.0,
+                          0.45 * e); // punchier over the dark card
+    for (int i = 0; i < 48; i++) {
+        double h = MAX(viz_vals[i * step] * (H - 2), 0.0);
+        if (h < 1.5)
+            continue;
+        double x = i * pitch + (pitch - barw) / 2;
+        double rr = MIN(barw / 2, h / 2);
+        double y = H - h;
+        cairo_new_sub_path(cr);
+        cairo_arc(cr, x + barw - rr, y + rr, rr, -G_PI / 2, 0);
+        cairo_line_to(cr, x + barw, H);
+        cairo_line_to(cr, x, H);
+        cairo_arc(cr, x + rr, y + rr, rr, G_PI, 3 * G_PI / 2);
+        cairo_close_path(cr);
+    }
+    cairo_fill(cr);
+    cairo_restore(cr);
+    return FALSE; // children (title, controls) draw on top
+}
 
 static void tb_cmd(const char *action) {
     if (!*tb_player)
@@ -232,9 +332,10 @@ static TbWin *tb_win_new(Bar *bar) {
     gtk_widget_set_size_request(slab, -1, TB_H);
 
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    gtk_widget_set_halign(box, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(box, GTK_ALIGN_CENTER); // dead-centred in the
-    gtk_widget_set_hexpand(box, TRUE);            // fixed-height slab
+    // positioned by gtk_fixed_move in tw_update_margin — no alignment
+    gtk_style_context_add_class(gtk_widget_get_style_context(box),
+                                "tb-content"); // colour-fade base
+    g_signal_connect(box, "draw", G_CALLBACK(tb_content_draw), tw);
 
     GtkWidget *icon = gtk_label_new("\U000F075A"); // music note
     gtk_widget_set_name(icon, "tb-icon");
@@ -259,15 +360,21 @@ static TbWin *tb_win_new(Bar *bar) {
                        tb_button("\U000F04AD", G_CALLBACK(on_tb_next)),
                        FALSE, FALSE, 0);
 
-    // spectrum behind the content, spanning the whole slab
-    GtkWidget *over = gtk_overlay_new();
-    tw->viz = gtk_drawing_area_new();
-    g_signal_connect(tw->viz, "draw", G_CALLBACK(viz_draw), NULL);
-    gtk_container_add(GTK_CONTAINER(over), tw->viz);
-    gtk_overlay_add_overlay(GTK_OVERLAY(over), box);
-    gtk_overlay_set_overlay_pass_through(GTK_OVERLAY(over), box, FALSE);
+    tw->slab = slab;
+    tw->content = box;
+    g_signal_connect(slab, "size-allocate", G_CALLBACK(tb_slab_sized),
+                     tw);
 
-    gtk_box_pack_start(GTK_BOX(slab), over, TRUE, TRUE, 0);
+    // the spectrum is painted by the slab's draw handler (behind its
+    // children); the content packs straight into the slab — windowless
+    // widgets whose margins are always honoured
+    g_signal_connect(slab, "draw", G_CALLBACK(viz_draw), tw);
+    tw->fix = gtk_fixed_new();
+    gtk_widget_set_hexpand(tw->fix, TRUE);
+    gtk_fixed_put(GTK_FIXED(tw->fix), box, 0, 0);
+    g_signal_connect(tw->fix, "size-allocate", G_CALLBACK(tb_slab_sized),
+                     tw);
+    gtk_box_pack_start(GTK_BOX(slab), tw->fix, TRUE, TRUE, 0);
     gtk_container_add(GTK_CONTAINER(tw->win), slab);
     return tw;
 }
@@ -284,6 +391,8 @@ static void tb_sync_windows(void) {
             if (g_ptr_array_index(bars, j) == tw->bar)
                 alive = TRUE;
         if (!alive) {
+            if (g_getenv("NEKOBAR_TB_DEBUG"))
+                g_printerr("sync: destroy stale tw=%p\n", (void *)tw);
             gtk_widget_destroy(tw->win);
             g_free(tw);
             g_ptr_array_remove_index(tb_wins, i);
@@ -297,9 +406,181 @@ static void tb_sync_windows(void) {
         for (guint i = 0; i < tb_wins->len; i++)
             if (((TbWin *)g_ptr_array_index(tb_wins, i))->bar == bar)
                 have = TRUE;
-        if (!have)
-            g_ptr_array_add(tb_wins, tb_win_new(bar));
+        if (!have) {
+            TbWin *nw = tb_win_new(bar);
+            if (g_getenv("NEKOBAR_TB_DEBUG"))
+                g_printerr("sync: create tw=%p mon=%s\n", (void *)nw,
+                           bar->hypr_name);
+            g_ptr_array_add(tb_wins, nw);
+        }
     }
+}
+
+// ---- per-monitor mode: when a matching app (VSCodium for now) is
+// focused on a monitor, that monitor's strip empties out and the music
+// controls shrink into a pill on the right ----
+
+// (timeout-driven morph: the old frame-clock driver froze across remaps)
+// place the content at explicit pixels inside the GtkFixed: ext=0 centres
+// it, ext=1 tucks it 10px from the right — no halign/margin machinery,
+// which proved unreliable across layer-surface remaps
+static void tw_update_margin(TbWin *tw) {
+    if (!tw->fix)
+        return;
+    GtkAllocation fa;
+    gtk_widget_get_allocation(tw->fix, &fa);
+    GtkRequisition nat;
+    gtk_widget_get_preferred_size(tw->content, NULL, &nat);
+    if (fa.width <= nat.width) // pre-allocation
+        return;
+    double cx = (fa.width - nat.width) / 2.0;
+    double rx = fa.width - nat.width - 10.0;
+    int x = (int)(cx + (rx - cx) * tw->pill_ext + 0.5);
+    int y = MAX(0, (fa.height - nat.height) / 2);
+    if (x != tw->last_x || y != tw->last_y) {
+        tw->last_x = x;
+        tw->last_y = y;
+        gtk_fixed_move(GTK_FIXED(tw->fix), tw->content, x, y);
+    }
+    if (g_getenv("NEKOBAR_TB_DEBUG"))
+        g_printerr("upd_pos mon=%s ext=%.2f x=%d y=%d fw=%d cw=%d\n",
+                   tw->bar->hypr_name, tw->pill_ext, x, y, fa.width,
+                   nat.width);
+}
+
+// plain timeout, NOT a frame-clock tick: tick callbacks proved
+// unreliable on layer surfaces that were unmapped and remapped
+static gboolean pill_tick(gpointer data) {
+    TbWin *tw = data;
+    gint64 now = g_get_monotonic_time();
+    double dt = CLAMP((now - tw->pill_last_us) / 1e6, 0.0, 0.05);
+    tw->pill_last_us = now;
+    double target = tw->pill ? 1.0 : 0.0;
+    tw->pill_ext += (target - tw->pill_ext) * MIN(1.0, 12.0 * dt);
+    if (ABS(target - tw->pill_ext) < 0.004)
+        tw->pill_ext = target;
+    tw_update_margin(tw);
+    gtk_widget_queue_draw(tw->slab);
+    if (g_getenv("NEKOBAR_TB_DEBUG"))
+        g_printerr("pill_tick ext=%.3f\n", tw->pill_ext);
+    if (tw->pill_ext == target) {
+        tw->pill_anim = 0;
+        return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+// make sure the morph is running (or snapped) whenever ext disagrees
+// with the mode — safe to call any time, e.g. right after mapping
+static void tw_kick_anim(TbWin *tw) {
+    double target = tw->pill ? 1.0 : 0.0;
+    if (tw->pill_ext == target || tw->pill_anim)
+        return;
+    if (gtk_widget_get_visible(tw->win)) {
+        tw->pill_last_us = g_get_monotonic_time();
+        tw->pill_anim = g_timeout_add(16, pill_tick, tw);
+    } else { // not on screen: snap
+        tw->pill_ext = target;
+        tw_update_margin(tw);
+        gtk_widget_queue_draw(tw->slab);
+    }
+}
+
+static void tw_apply_mode(TbWin *tw, gboolean pill) {
+    if (tw->pill == pill)
+        return;
+    tw->pill = pill;
+    // card/strip colours cross-fade via the CSS transitions; the slide
+    // and the visualizer compression follow pill_ext below
+    GtkStyleContext *ss = gtk_widget_get_style_context(tw->slab);
+    GtkStyleContext *cs = gtk_widget_get_style_context(tw->content);
+    if (pill) {
+        gtk_style_context_add_class(ss, "empty");
+        gtk_style_context_add_class(cs, "tb-pill");
+    } else {
+        gtk_style_context_remove_class(ss, "empty");
+        gtk_style_context_remove_class(cs, "tb-pill");
+    }
+    tw_kick_anim(tw);
+}
+
+static void tb_slab_sized(GtkWidget *w, GdkRectangle *alloc,
+                          gpointer data) {
+    (void)w;
+    (void)alloc;
+    tw_update_margin(data); // keep the centring exact on any resize
+}
+
+// pill only while a matching app IS the focused window, and only on the
+// monitor holding it — focus anything else and every bar re-centres
+static void tb_refocus_now(void) {
+    if (!tb_wins || !tb_wins->len)
+        return;
+    char *win = NULL;
+    g_spawn_command_line_sync("hyprctl activewindow -j", &win, NULL, NULL,
+                              NULL);
+    char pill_mon[64] = "";
+    if (win) {
+        JsonParser *p = json_parser_new();
+        if (json_parser_load_from_data(p, win, -1, NULL) &&
+            json_parser_get_root(p) &&
+            JSON_NODE_HOLDS_OBJECT(json_parser_get_root(p))) {
+            JsonObject *o = json_node_get_object(json_parser_get_root(p));
+            const char *cls =
+                json_object_get_string_member_with_default(o, "class", "");
+            if (cls && strstr(cls, "codium")) {
+                gint64 mon_id =
+                    json_object_get_int_member_with_default(o, "monitor",
+                                                            -1);
+                // resolve the monitor id to its name
+                char *mons = NULL;
+                g_spawn_command_line_sync("hyprctl monitors -j", &mons,
+                                          NULL, NULL, NULL);
+                if (mons) {
+                    JsonParser *pm = json_parser_new();
+                    if (json_parser_load_from_data(pm, mons, -1, NULL)) {
+                        JsonArray *arr =
+                            json_node_get_array(json_parser_get_root(pm));
+                        for (guint i = 0; i < json_array_get_length(arr);
+                             i++) {
+                            JsonObject *m =
+                                json_array_get_object_element(arr, i);
+                            if (json_object_get_int_member(m, "id") ==
+                                mon_id)
+                                g_strlcpy(pill_mon,
+                                          json_object_get_string_member(
+                                              m, "name"),
+                                          sizeof(pill_mon));
+                        }
+                    }
+                    g_object_unref(pm);
+                    g_free(mons);
+                }
+            }
+        }
+        g_object_unref(p);
+        g_free(win);
+    }
+    for (guint i = 0; i < tb_wins->len; i++) {
+        TbWin *tw = g_ptr_array_index(tb_wins, i);
+        tw_apply_mode(tw, *pill_mon &&
+                              g_str_equal(tw->bar->hypr_name, pill_mon));
+    }
+}
+
+static guint refocus_id;
+
+static gboolean refocus_cb(gpointer data) {
+    (void)data;
+    refocus_id = 0;
+    tb_refocus_now();
+    return G_SOURCE_REMOVE;
+}
+
+// hypr.c calls this on focus/workspace events — debounced, they're chatty
+void toolbar_refocus(void) {
+    if (!refocus_id)
+        refocus_id = g_timeout_add(120, refocus_cb, NULL);
 }
 
 static gboolean tb_visible(void) {
@@ -323,6 +604,13 @@ static void tb_hide(void) {
             tw->bar->tb_inset = 0;
             gtk_widget_queue_draw(tw->bar->frame);
         }
+        // finish any morph instantly while hidden
+        if (tw->pill_anim) {
+            g_source_remove(tw->pill_anim);
+            tw->pill_anim = 0;
+        }
+        tw->pill_ext = tw->pill ? 1.0 : 0.0;
+        tw_update_margin(tw);
     }
     viz_stop();
 }
@@ -347,6 +635,10 @@ static void tb_show(void) {
         }
     }
     viz_start();
+    tb_refocus_now(); // pick the right mode per monitor immediately
+    for (guint i = 0; tb_wins && i < tb_wins->len; i++)
+        tw_kick_anim(g_ptr_array_index(tb_wins, i)); // now that we're
+                                                     // mapped for real
 }
 
 // mpris player owned by the youtube-music desktop app, or NULL

@@ -378,6 +378,12 @@ static gboolean on_event(GIOChannel *ch, GIOCondition cond, gpointer data) {
             launcher_autoclose();
             quickset_autoclose();
         }
+        // the context toolbar reshapes per-monitor by focused app
+        if (g_str_has_prefix(line, "activewindow") ||
+            g_str_has_prefix(line, "focusedmon") ||
+            g_str_has_prefix(line, "workspace") ||
+            g_str_has_prefix(line, "movewindow"))
+            toolbar_refocus();
         if (g_str_has_prefix(line, "monitoradded"))
             schedule_heal(TRUE); // re-added monitors need the full remap
         else if (g_str_has_prefix(line, "monitorremoved"))
