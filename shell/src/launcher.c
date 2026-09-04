@@ -328,6 +328,8 @@ static GHashTable *apps_by_id(void) {
 
 static GtkWidget *app_cell_content(GAppInfo *info) {
     GtkWidget *v = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
+    // the cell label is ellipsized: hover reveals the full name
+    gtk_widget_set_tooltip_text(v, g_app_info_get_display_name(info));
     GIcon *gicon = g_app_info_get_icon(info);
     GtkWidget *img =
         gicon ? gtk_image_new_from_gicon(gicon, GTK_ICON_SIZE_DND)
@@ -814,6 +816,7 @@ static GtkWidget *folder_cell_content(const char *val, GHashTable *apps) {
     char *name;
     char **ids = folder_parse(val, &name);
     GtkWidget *v = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
+    gtk_widget_set_tooltip_text(v, name); // full folder name on hover
     GtkWidget *mini = gtk_grid_new();
     gtk_widget_set_name(mini, "folder-preview");
     gtk_grid_set_row_spacing(GTK_GRID(mini), 2);
@@ -1020,6 +1023,7 @@ static void folder_card_open(Bar *bar, int slot) {
                 "application-x-executable", GTK_ICON_SIZE_DND);
             gtk_image_set_pixel_size(GTK_IMAGE(img), 34);
             gtk_box_pack_start(GTK_BOX(fb), img, FALSE, FALSE, 0);
+            gtk_widget_set_tooltip_text(fb, ids[i]); // full id on hover
             GtkWidget *lbl = gtk_label_new(ids[i]);
             gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_END);
             gtk_label_set_max_width_chars(GTK_LABEL(lbl), 9);
