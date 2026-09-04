@@ -19,6 +19,7 @@ typedef struct {
     GtkWidget *ws_box;       // workspace dot buttons
     GtkWidget *title_label;  // focused window title
     GtkWidget *mpris_event;  // mpris pill container (hidden when no player)
+    GtkWidget *mpris_icon;   // upright status glyph above the rotated text
     GtkWidget *mpris_label;
     GtkWidget *tray_box;     // system tray icons
     GtkWidget *clock_label;

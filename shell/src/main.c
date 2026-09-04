@@ -236,6 +236,26 @@ static gboolean ws_scrolled(GtkWidget *w, GdkEventScroll *ev,
     return TRUE;
 }
 
+static void dump_child_w(GtkWidget *child, gpointer data) {
+    (void)data;
+    GtkAllocation a;
+    gtk_widget_get_allocation(child, &a);
+    g_printerr("  %-16s w=%d\n",
+               gtk_widget_get_name(child) ? gtk_widget_get_name(child)
+                                          : G_OBJECT_TYPE_NAME(child),
+               a.width);
+    if (GTK_IS_CONTAINER(child))
+        gtk_container_foreach(GTK_CONTAINER(child), dump_child_w, NULL);
+}
+
+static gboolean dump_widths(gpointer data) {
+    Bar *bar = data;
+    g_printerr("bar %s widths:\n", bar->hypr_name);
+    GtkWidget *box = gtk_bin_get_child(GTK_BIN(bar->window));
+    dump_child_w(box, NULL);
+    return G_SOURCE_REMOVE;
+}
+
 static void center_child(GtkWidget *child, gpointer data) {
     (void)data;
     gtk_widget_set_halign(child, GTK_ALIGN_CENTER);
@@ -299,12 +319,20 @@ static Bar *bar_new(GdkMonitor *gdk_mon) {
     gtk_container_add(GTK_CONTAINER(ws_ev), bar->ws_box);
     gtk_box_pack_start(GTK_BOX(left), ws_ev, FALSE, FALSE, 0);
 
-    bar->mpris_event = gtk_button_new_with_label("");
+    // the status glyph stays upright above the rotated text: nerd-font
+    // glyphs in a rotated label pull a taller fallback line and double
+    // the pill's width
+    bar->mpris_event = gtk_button_new();
     gtk_button_set_relief(GTK_BUTTON(bar->mpris_event), GTK_RELIEF_NONE);
-    bar->mpris_label = gtk_bin_get_child(GTK_BIN(bar->mpris_event));
+    GtkWidget *mpv = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
+    bar->mpris_icon = gtk_label_new("");
+    gtk_box_pack_start(GTK_BOX(mpv), bar->mpris_icon, FALSE, FALSE, 0);
+    bar->mpris_label = gtk_label_new("");
     gtk_label_set_angle(GTK_LABEL(bar->mpris_label), 270);
     gtk_label_set_ellipsize(GTK_LABEL(bar->mpris_label), PANGO_ELLIPSIZE_END);
     gtk_label_set_max_width_chars(GTK_LABEL(bar->mpris_label), 28);
+    gtk_box_pack_start(GTK_BOX(mpv), bar->mpris_label, FALSE, FALSE, 0);
+    gtk_container_add(GTK_CONTAINER(bar->mpris_event), mpv);
     gtk_widget_set_name(bar->mpris_event, "mpris");
     g_signal_connect(bar->mpris_event, "button-press-event",
                      G_CALLBACK(mpris_pressed), NULL);
@@ -373,6 +401,8 @@ static Bar *bar_new(GdkMonitor *gdk_mon) {
     gtk_widget_show_all(GTK_WIDGET(win));
     gtk_widget_set_visible(bar->mpris_event, FALSE);
     gtk_widget_set_visible(bar->tray_box, FALSE);
+    if (g_getenv("NEKOBAR_DEBUG_W"))
+        g_timeout_add(1500, dump_widths, bar);
     return bar;
 }
 

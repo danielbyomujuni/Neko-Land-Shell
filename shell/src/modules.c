@@ -43,7 +43,7 @@ static gboolean mem_tick(gpointer data) {
     }
     fclose(f);
     char buf[64];
-    g_snprintf(buf, sizeof(buf), "%.1f\nG", (total - avail) / 1048576.0);
+    g_snprintf(buf, sizeof(buf), "%.0fG", (total - avail) / 1048576.0);
     for (guint i = 0; i < bars->len; i++) {
         Bar *bar = g_ptr_array_index(bars, i);
         gtk_label_set_text(GTK_LABEL(bar->mem_label), buf);
@@ -124,12 +124,18 @@ static gboolean mpris_tick(gpointer data) {
             else if (strstr(player, "mpv"))
                 icon = "";
             else
-                icon = "▶";
+                icon = "\U000F040A"; // NF play glyph: the U+25B6
+                // fallback font has taller metrics, which widens
+                // the rotated pill by a full extra line
             // truncate title to 20 chars like waybar's title-len
             char *title = g_utf8_substring(parts[2], 0,
                                            MIN(20, g_utf8_strlen(parts[2], -1)));
-            g_snprintf(label, sizeof(label), "%s %s - %s", icon, artist, title);
+            g_snprintf(label, sizeof(label), "%s - %s", artist, title);
             g_free(title);
+            for (guint i = 0; i < bars->len; i++) {
+                Bar *bar = g_ptr_array_index(bars, i);
+                gtk_label_set_text(GTK_LABEL(bar->mpris_icon), icon);
+            }
         } else {
             have = FALSE;
         }

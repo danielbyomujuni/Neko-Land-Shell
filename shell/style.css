@@ -19,7 +19,7 @@ window#nekobar {
   margin: 0;
   /* left padding exceeds right by the chrome lip width (5px) so widgets
      center in the VISIBLE column (bar + lip), not just the bar surface */
-  padding: 6px 3px 6px 8px;
+  padding: 5px 1px 5px 6px;
 }
 
 /* flat icon buttons */
@@ -40,16 +40,16 @@ window#nekobar {
 #rofi {
   margin-top: 6pt;
   padding: 0;
-  font-size: 12pt;
+  font-size: 11pt;
 }
-#rofi * { font-size: 12pt; }
+#rofi * { font-size: 11pt; }
 
 #workspaces {
   background: #181825;
   border: solid 1px #1e1e2e;
   border-radius: 7pt;
   margin: 10pt 0 0 0;
-  padding: 5pt 4pt;
+  padding: 4pt 3pt;
 }
 #workspaces button {
   background: #45475a;
@@ -83,7 +83,7 @@ window#nekobar {
   box-shadow: none;
   border-radius: 12pt;
   margin-top: 14pt;
-  padding: 8pt 2pt;
+  padding: 8pt 1pt;
   min-height: 0;
 }
 #mpris * { color: #a6e3a1; }
@@ -192,7 +192,7 @@ menu check {
 #wallpaper {
   margin-bottom: 10pt;
 }
-#wallpaper * { font-size: 12pt; }
+#wallpaper * { font-size: 10.5pt; }
 
 #power {
   margin-bottom: 7pt;
