@@ -176,6 +176,8 @@ menu check {
 
 #quickset-btn {
   margin-bottom: 10pt;
+  /* the cog glyph sits a touch right of its neighbours' optical column */
+  padding-right: 2px;
 }
 #quickset-btn * { color: #74c7ec; font-size: 10pt; }
 
