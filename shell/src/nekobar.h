@@ -5,6 +5,7 @@
 // One bar instance per monitor.
 typedef struct {
     GtkWindow *window;
+    GtkWidget *frame; // screen-border frame surface (always visible)
     GdkMonitor *gdk_monitor;
     GtkWidget *ws_box;       // workspace dot buttons
     GtkWidget *title_label;  // focused window title

@@ -12,12 +12,12 @@ window#nekobar {
 }
 
 #bar-box {
-  background: #11111b;
-  border-radius: 12pt;
-  border: solid 2px;
-  border-color: #1e1e2e;
-  margin: 6pt;
-  padding: 2pt;
+  /* the chrome slab behind (nekobar-frame) provides the background, so
+     the sidebar and border are one connected piece */
+  background: none;
+  border: none;
+  margin: 0;
+  padding: 4pt 2pt;
 }
 
 /* flat icon buttons */
@@ -36,27 +36,27 @@ window#nekobar {
 }
 
 #rofi {
-  margin-left: 7pt;
-  padding-right: 3pt;
+  margin-top: 7pt;
+  padding-bottom: 3pt;
   font-size: 12pt;
 }
 #rofi * { font-size: 12pt; }
 
 #workspaces {
-  margin-left: 12pt;
+  margin-top: 12pt;
 }
 #workspaces button {
   background: none;
   border: none;
   box-shadow: none;
-  padding: 0 2pt;
+  padding: 2pt 0;
   min-width: 0;
   min-height: 0;
   color: #585b70;
 }
 #workspaces button * { color: inherit; }
 #workspaces button:not(:first-child) {
-  margin-left: 2pt;
+  margin-top: 4pt;
 }
 #workspaces button.visible {
   color: #89b4fa;
@@ -79,24 +79,24 @@ window#nekobar {
   border: none;
   box-shadow: none;
   border-radius: 12pt;
-  margin-left: 15pt;
-  padding: 0 8pt;
+  margin-top: 15pt;
+  padding: 8pt 0;
   min-height: 0;
 }
 #mpris * { color: #a6e3a1; }
 
 #window-title {
-  margin-left: 15pt;
-  margin-right: 20pt;
+  margin-top: 8pt;
+  margin-bottom: 8pt;
 }
 
 #memory {
   color: #fab387;
-  margin-right: 12pt;
+  margin-bottom: 12pt;
 }
 
 #tray {
-  margin-right: 10pt;
+  margin-bottom: 10pt;
 }
 #tray button {
   background: none;
@@ -172,27 +172,27 @@ menu check {
 }
 
 #pulseaudio {
-  margin-right: 10pt;
+  margin-bottom: 10pt;
 }
 #pulseaudio * { color: #74c7ec; }
 
 #color-picker {
-  margin-right: 18pt;
+  margin-bottom: 14pt;
 }
 #color-picker * { font-size: 9pt; }
 
 #screenshot {
-  margin-right: 18pt;
+  margin-bottom: 14pt;
 }
 #screenshot * { font-size: 10pt; }
 
 #wallpaper {
-  margin-right: 16pt;
+  margin-bottom: 12pt;
 }
 #wallpaper * { font-size: 12pt; }
 
 #power {
-  margin-right: 11pt;
+  margin-bottom: 9pt;
 }
 #power * { font-size: 10pt; }
 
@@ -203,4 +203,8 @@ menu check {
 #pulseaudio:hover,
 #rofi:hover {
   opacity: 0.6;
+}
+
+#clock {
+  margin-bottom: 8pt;
 }

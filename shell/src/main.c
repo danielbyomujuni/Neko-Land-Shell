@@ -77,6 +77,95 @@ static gboolean vol_pressed(GtkWidget *w, GdkEventButton *ev, gpointer data) {
     return TRUE;
 }
 
+// ---- shell chrome ----
+// A thin border slab per monitor, continuous with the sidebar strip: the
+// hole is cut FRAME_W from the screen edges (and at the sidebar's right
+// edge), leaving the rest of hyprland's gaps_out as visible margin between
+// the shell and the windows. The sidebar draws its content transparently
+// on top of this slab, so the two are one connected piece.
+
+#define FRAME_W 5.0
+#define FRAME_R 14.0
+
+static void rounded_path(cairo_t *cr, double x, double y, double w, double h,
+                         double r) {
+    cairo_new_sub_path(cr);
+    cairo_arc(cr, x + w - r, y + r, r, -G_PI / 2, 0);
+    cairo_arc(cr, x + w - r, y + h - r, r, 0, G_PI / 2);
+    cairo_arc(cr, x + r, y + h - r, r, G_PI / 2, G_PI);
+    cairo_arc(cr, x + r, y + r, r, G_PI, 3 * G_PI / 2);
+    cairo_close_path(cr);
+}
+
+static gboolean frame_draw_cb(GtkWidget *w, cairo_t *cr, gpointer data) {
+    Bar *bar = data;
+    double width = gtk_widget_get_allocated_width(w);
+    double height = gtk_widget_get_allocated_height(w);
+    // the hole starts at the sidebar's right edge; elsewhere the border
+    // is a thin FRAME_W strip along the screen edge
+    double bar_w = 44;
+    if (bar->window && gtk_widget_get_realized(GTK_WIDGET(bar->window)))
+        bar_w = gtk_widget_get_allocated_width(GTK_WIDGET(bar->window));
+    double hx = bar_w;
+    double hy = FRAME_W;
+    double hw = width - hx - FRAME_W;
+    double hh = height - 2 * FRAME_W;
+
+    cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+    cairo_set_source_rgba(cr, 0, 0, 0, 0);
+    cairo_paint(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+    cairo_set_fill_rule(cr, CAIRO_FILL_RULE_EVEN_ODD);
+    cairo_rectangle(cr, 0, 0, width, height);
+    rounded_path(cr, hx, hy, hw, hh, FRAME_R);
+    cairo_set_source_rgb(cr, 0x11 / 255.0, 0x11 / 255.0, 0x1B / 255.0);
+    cairo_fill(cr);
+    // rim line around the hole
+    rounded_path(cr, hx, hy, hw, hh, FRAME_R);
+    cairo_set_line_width(cr, 2);
+    cairo_set_source_rgb(cr, 0x1E / 255.0, 0x1E / 255.0, 0x2E / 255.0);
+    cairo_stroke(cr);
+    // soft inner shadow just inside the hole: the inset depth cue
+    for (int i = 1; i <= 4; i++) {
+        rounded_path(cr, hx + i, hy + i, hw - 2 * i, hh - 2 * i,
+                     MAX(FRAME_R - i, 1));
+        cairo_set_line_width(cr, 1.2);
+        cairo_set_source_rgba(cr, 0, 0, 0, 0.16 - 0.035 * i);
+        cairo_stroke(cr);
+    }
+    return TRUE;
+}
+
+static void frame_mapped(GtkWidget *w, gpointer data) {
+    (void)data;
+    // click-through: empty input region
+    cairo_region_t *empty = cairo_region_create();
+    gtk_widget_input_shape_combine_region(w, empty);
+    cairo_region_destroy(empty);
+}
+
+static GtkWidget *frame_new(GdkMonitor *gdk_mon, Bar *bar) {
+    GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_layer_init_for_window(GTK_WINDOW(win));
+    gtk_layer_set_layer(GTK_WINDOW(win), GTK_LAYER_SHELL_LAYER_TOP);
+    gtk_layer_set_namespace(GTK_WINDOW(win), "nekobar-frame");
+    gtk_layer_set_monitor(GTK_WINDOW(win), gdk_mon);
+    gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
+    gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_RIGHT, TRUE);
+    gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_TOP, TRUE);
+    gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_BOTTOM, TRUE);
+    gtk_layer_set_exclusive_zone(GTK_WINDOW(win), -1); // hug the true edges
+    GdkScreen *screen = gtk_widget_get_screen(win);
+    GdkVisual *rgba = gdk_screen_get_rgba_visual(screen);
+    if (rgba)
+        gtk_widget_set_visual(win, rgba);
+    gtk_widget_set_app_paintable(win, TRUE);
+    g_signal_connect(win, "draw", G_CALLBACK(frame_draw_cb), bar);
+    g_signal_connect(win, "map", G_CALLBACK(frame_mapped), NULL);
+    gtk_widget_show_all(win);
+    return win;
+}
+
 static Bar *bar_new(GdkMonitor *gdk_mon) {
     Bar *bar = g_new0(Bar, 1);
 
@@ -85,6 +174,8 @@ static Bar *bar_new(GdkMonitor *gdk_mon) {
     if (!hypr_monitor_name_at(geo.x, geo.y, bar->hypr_name,
                               sizeof(bar->hypr_name)))
         g_strlcpy(bar->hypr_name, "?", sizeof(bar->hypr_name));
+
+    bar->frame = frame_new(gdk_mon, bar);
 
     GtkWindow *win = GTK_WINDOW(gtk_window_new(GTK_WINDOW_TOPLEVEL));
     bar->window = win;
@@ -95,12 +186,10 @@ static Bar *bar_new(GdkMonitor *gdk_mon) {
     gtk_layer_set_layer(win, GTK_LAYER_SHELL_LAYER_TOP);
     gtk_layer_set_namespace(win, "nekobar");
     gtk_layer_set_monitor(win, gdk_mon);
-    gtk_layer_set_anchor(win, GTK_LAYER_SHELL_EDGE_TOP, TRUE);
+    // vertical sidebar hugging the left edge (caelestia-style layout)
     gtk_layer_set_anchor(win, GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
-    gtk_layer_set_anchor(win, GTK_LAYER_SHELL_EDGE_RIGHT, TRUE);
-    // waybar config: margin-left/right 4
-    gtk_layer_set_margin(win, GTK_LAYER_SHELL_EDGE_LEFT, 4);
-    gtk_layer_set_margin(win, GTK_LAYER_SHELL_EDGE_RIGHT, 4);
+    gtk_layer_set_anchor(win, GTK_LAYER_SHELL_EDGE_TOP, TRUE);
+    gtk_layer_set_anchor(win, GTK_LAYER_SHELL_EDGE_BOTTOM, TRUE);
     gtk_layer_auto_exclusive_zone_enable(win);
 
     // transparent window background
@@ -110,13 +199,13 @@ static Bar *bar_new(GdkMonitor *gdk_mon) {
         gtk_widget_set_visual(GTK_WIDGET(win), rgba);
     gtk_widget_set_app_paintable(GTK_WIDGET(win), TRUE);
 
-    // rounded inner box, like waybar's `#waybar.top > box.horizontal`
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    // vertical rounded pill, caelestia-style sidebar layout
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_set_name(box, "bar-box");
     gtk_container_add(GTK_CONTAINER(win), box);
 
-    // ---- left ----
-    GtkWidget *left = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    // ---- top: launcher + workspaces + media ----
+    GtkWidget *left = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_box_pack_start(GTK_BOX(box), left, FALSE, FALSE, 0);
 
     gtk_box_pack_start(GTK_BOX(left),
@@ -125,34 +214,39 @@ static Bar *bar_new(GdkMonitor *gdk_mon) {
                                    NULL, "pkill -9 rofi"),
                        FALSE, FALSE, 0);
 
-    bar->ws_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    bar->ws_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_set_name(bar->ws_box, "workspaces");
     gtk_box_pack_start(GTK_BOX(left), bar->ws_box, FALSE, FALSE, 0);
 
     bar->mpris_event = gtk_button_new_with_label("");
     gtk_button_set_relief(GTK_BUTTON(bar->mpris_event), GTK_RELIEF_NONE);
     bar->mpris_label = gtk_bin_get_child(GTK_BIN(bar->mpris_event));
+    gtk_label_set_angle(GTK_LABEL(bar->mpris_label), 270);
+    gtk_label_set_ellipsize(GTK_LABEL(bar->mpris_label), PANGO_ELLIPSIZE_END);
+    gtk_label_set_max_width_chars(GTK_LABEL(bar->mpris_label), 28);
     gtk_widget_set_name(bar->mpris_event, "mpris");
     g_signal_connect(bar->mpris_event, "button-press-event",
                      G_CALLBACK(mpris_pressed), NULL);
     gtk_box_pack_start(GTK_BOX(left), bar->mpris_event, FALSE, FALSE, 0);
 
+    // focused window title reads top-to-bottom (caelestia ActiveWindow)
     bar->title_label = gtk_label_new("");
     gtk_widget_set_name(bar->title_label, "window-title");
+    gtk_label_set_angle(GTK_LABEL(bar->title_label), 270);
     gtk_label_set_ellipsize(GTK_LABEL(bar->title_label), PANGO_ELLIPSIZE_END);
-    gtk_label_set_max_width_chars(GTK_LABEL(bar->title_label), 60);
-    gtk_box_pack_start(GTK_BOX(left), bar->title_label, FALSE, FALSE, 0);
+    gtk_label_set_max_width_chars(GTK_LABEL(bar->title_label), 32);
+    gtk_box_set_center_widget(GTK_BOX(box), bar->title_label);
 
-    // ---- center ----
     bar->clock_label = gtk_label_new("");
     gtk_widget_set_name(bar->clock_label, "clock");
-    gtk_box_set_center_widget(GTK_BOX(box), bar->clock_label);
+    gtk_label_set_justify(GTK_LABEL(bar->clock_label), GTK_JUSTIFY_CENTER);
 
-    // ---- right (packed end: reverse order) ----
+    // ---- bottom (packed end: first call sits at the very bottom) ----
     gtk_box_pack_end(GTK_BOX(box),
                      icon_button("", "power", "~/.config/rofi/powermenu.sh",
                                  NULL, NULL),
                      FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(box), bar->clock_label, FALSE, FALSE, 0);
     gtk_box_pack_end(GTK_BOX(box),
                      icon_button("\U000F0E09", "wallpaper", "waypaper",
                                  "waypaper --random", NULL),
@@ -180,7 +274,7 @@ static Bar *bar_new(GdkMonitor *gdk_mon) {
     gtk_box_pack_end(GTK_BOX(box), vol_ev, FALSE, FALSE, 0);
     quickset_attach(bar, vol_ev);
 
-    bar->tray_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    bar->tray_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
     gtk_widget_set_name(bar->tray_box, "tray");
     gtk_box_pack_end(GTK_BOX(box), bar->tray_box, FALSE, FALSE, 0);
 
@@ -188,6 +282,8 @@ static Bar *bar_new(GdkMonitor *gdk_mon) {
     gtk_widget_set_name(bar->mem_label, "memory");
     gtk_box_pack_end(GTK_BOX(box), bar->mem_label, FALSE, FALSE, 0);
 
+    g_signal_connect_swapped(GTK_WIDGET(win), "size-allocate",
+                             G_CALLBACK(gtk_widget_queue_draw), bar->frame);
     gtk_widget_show_all(GTK_WIDGET(win));
     gtk_widget_set_visible(bar->mpris_event, FALSE);
     gtk_widget_set_visible(bar->tray_box, FALSE);
@@ -225,6 +321,8 @@ static gboolean on_sigusr1(gpointer data) {
 static void bar_free(Bar *bar) {
     if (bar->qs_popover)
         gtk_widget_destroy(bar->qs_popover);
+    if (bar->frame)
+        gtk_widget_destroy(bar->frame);
     gtk_widget_destroy(GTK_WIDGET(bar->window));
     g_free(bar);
 }

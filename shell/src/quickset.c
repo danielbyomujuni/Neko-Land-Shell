@@ -231,9 +231,9 @@ void quickset_attach(Bar *bar, GtkWidget *anchor) {
     gtk_layer_set_layer(GTK_WINDOW(win), GTK_LAYER_SHELL_LAYER_TOP);
     gtk_layer_set_namespace(GTK_WINDOW(win), "nekobar-quickset");
     gtk_layer_set_monitor(GTK_WINDOW(win), bar->gdk_monitor);
-    gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_TOP, TRUE);
-    gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_RIGHT, TRUE);
-    gtk_layer_set_margin(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_RIGHT, 60);
+    gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_BOTTOM, TRUE);
+    gtk_layer_set_anchor(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
+    gtk_layer_set_margin(GTK_WINDOW(win), GTK_LAYER_SHELL_EDGE_BOTTOM, 60);
 
     GdkScreen *screen = gtk_widget_get_screen(win);
     GdkVisual *rgba = gdk_screen_get_rgba_visual(screen);

@@ -17,10 +17,13 @@ static gboolean clock_tick(gpointer data) {
     time_t now = time(NULL);
     struct tm tm;
     localtime_r(&now, &tm);
-    strftime(buf, sizeof(buf), "  %a %e %b %H:%M", &tm);
+    strftime(buf, sizeof(buf), "%H\n%M", &tm);
+    char tip[64];
+    strftime(tip, sizeof(tip), "%A %e %B", &tm);
     for (guint i = 0; i < bars->len; i++) {
         Bar *bar = g_ptr_array_index(bars, i);
         gtk_label_set_text(GTK_LABEL(bar->clock_label), buf);
+        gtk_widget_set_tooltip_text(bar->clock_label, tip);
     }
     return TRUE;
 }
@@ -40,7 +43,7 @@ static gboolean mem_tick(gpointer data) {
     }
     fclose(f);
     char buf[64];
-    g_snprintf(buf, sizeof(buf), " Mem %.2fGiB", (total - avail) / 1048576.0);
+    g_snprintf(buf, sizeof(buf), "%.1f\nG", (total - avail) / 1048576.0);
     for (guint i = 0; i < bars->len; i++) {
         Bar *bar = g_ptr_array_index(bars, i);
         gtk_label_set_text(GTK_LABEL(bar->mem_label), buf);
@@ -75,11 +78,15 @@ static gboolean vol_tick(gpointer data) {
         const char *icon = vol < 0.34   ? "\U000F057F"
                            : vol < 0.67 ? "\U000F0580"
                                         : "\U000F057E";
-        g_snprintf(buf, sizeof(buf), "%s %d%%", icon, (int)(vol * 100 + 0.5));
+        // sidebar: icon only, the percentage lives in the tooltip/quickset
+        g_strlcpy(buf, icon, sizeof(buf));
     }
+    char tip[32];
+    g_snprintf(tip, sizeof(tip), "%d%%", (int)(vol * 100 + 0.5));
     for (guint i = 0; i < bars->len; i++) {
         Bar *bar = g_ptr_array_index(bars, i);
         gtk_label_set_text(GTK_LABEL(bar->vol_label), buf);
+        gtk_widget_set_tooltip_text(bar->vol_label, tip);
     }
     quickset_sync();
     return TRUE;
