@@ -121,6 +121,7 @@ static void clear_children(GtkWidget *box) {
 typedef struct {
     gint64 id;
     const char *monitor;
+    gint64 windows;
 } WsInfo;
 
 static gint ws_cmp(gconstpointer a, gconstpointer b) {
@@ -163,6 +164,7 @@ void hypr_refresh_workspaces(void) {
         WsInfo info = {
             .id = json_object_get_int_member(w, "id"),
             .monitor = json_object_get_string_member(w, "monitor"),
+            .windows = json_object_get_int_member(w, "windows"),
         };
         if (info.id > 0) // skip special workspaces
             g_array_append_val(list, info);
@@ -171,27 +173,63 @@ void hypr_refresh_workspaces(void) {
 
     for (guint b = 0; b < bars->len; b++) {
         Bar *bar = g_ptr_array_index(bars, b);
-        clear_children(bar->ws_box);
         int mon_active = GPOINTER_TO_INT(
             g_hash_table_lookup(active, bar->hypr_name));
         gboolean mon_focused = g_str_equal(bar->hypr_name, focused_mon);
 
+        // this bar's workspaces, in id order
+        GArray *mine = g_array_new(FALSE, FALSE, sizeof(WsInfo *));
+        GString *sig = g_string_new(NULL);
         for (guint i = 0; i < list->len; i++) {
             WsInfo *w = &g_array_index(list, WsInfo, i);
             if (!w->monitor || !g_str_equal(w->monitor, bar->hypr_name))
                 continue;
-            gboolean is_active = w->id == mon_active;
-            GtkWidget *btn = gtk_button_new_with_label(
-                is_active ? "" : "");
-            gtk_button_set_relief(GTK_BUTTON(btn), GTK_RELIEF_NONE);
-            GtkStyleContext *sc = gtk_widget_get_style_context(btn);
-            if (is_active)
-                gtk_style_context_add_class(sc, mon_focused ? "active" : "visible");
-            g_signal_connect(btn, "clicked", G_CALLBACK(ws_clicked),
-                             GINT_TO_POINTER((int)w->id));
-            gtk_box_pack_start(GTK_BOX(bar->ws_box), btn, FALSE, FALSE, 0);
+            g_array_append_val(mine, w);
+            g_string_append_printf(sig, "%d,", (int)w->id);
         }
-        gtk_widget_show_all(bar->ws_box);
+
+        // dot widgets persist so CSS transitions can animate the active
+        // pill; rebuild only when the workspace set changes
+        const char *old_sig =
+            g_object_get_data(G_OBJECT(bar->ws_box), "ws-sig");
+        if (!old_sig || !g_str_equal(old_sig, sig->str)) {
+            clear_children(bar->ws_box);
+            for (guint i = 0; i < mine->len; i++) {
+                WsInfo *w = g_array_index(mine, WsInfo *, i);
+                GtkWidget *btn = gtk_button_new();
+                gtk_button_set_relief(GTK_BUTTON(btn), GTK_RELIEF_NONE);
+                gtk_widget_set_halign(btn, GTK_ALIGN_CENTER);
+                g_signal_connect(btn, "clicked", G_CALLBACK(ws_clicked),
+                                 GINT_TO_POINTER((int)w->id));
+                gtk_box_pack_start(GTK_BOX(bar->ws_box), btn, FALSE, FALSE,
+                                   0);
+            }
+            g_object_set_data_full(G_OBJECT(bar->ws_box), "ws-sig",
+                                   g_strdup(sig->str), g_free);
+            gtk_widget_show_all(bar->ws_box);
+        }
+
+        // state classes: occupied / visible (active on unfocused monitor)
+        // / active (focused monitor)
+        GList *kids =
+            gtk_container_get_children(GTK_CONTAINER(bar->ws_box));
+        GList *l = kids;
+        for (guint i = 0; i < mine->len && l; i++, l = l->next) {
+            WsInfo *w = g_array_index(mine, WsInfo *, i);
+            GtkStyleContext *sc =
+                gtk_widget_get_style_context(GTK_WIDGET(l->data));
+            gtk_style_context_remove_class(sc, "active");
+            gtk_style_context_remove_class(sc, "visible");
+            gtk_style_context_remove_class(sc, "occupied");
+            if (w->windows > 0)
+                gtk_style_context_add_class(sc, "occupied");
+            if (w->id == mon_active)
+                gtk_style_context_add_class(sc, mon_focused ? "active"
+                                                            : "visible");
+        }
+        g_list_free(kids);
+        g_string_free(sig, TRUE);
+        g_array_free(mine, TRUE);
     }
 
     g_array_free(list, TRUE);

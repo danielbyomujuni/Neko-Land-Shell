@@ -224,6 +224,18 @@ static gboolean launcher_btn_pressed(GtkWidget *w, GdkEventButton *ev,
     return TRUE;
 }
 
+// scroll on the workspace capsule cycles that monitor's workspaces
+static gboolean ws_scrolled(GtkWidget *w, GdkEventScroll *ev,
+                            gpointer data) {
+    (void)w;
+    (void)data;
+    if (ev->direction == GDK_SCROLL_UP)
+        hypr_dispatch("split-workspace -1");
+    else if (ev->direction == GDK_SCROLL_DOWN)
+        hypr_dispatch("split-workspace +1");
+    return TRUE;
+}
+
 static Bar *bar_new(GdkMonitor *gdk_mon) {
     Bar *bar = g_new0(Bar, 1);
 
@@ -276,7 +288,11 @@ static Bar *bar_new(GdkMonitor *gdk_mon) {
 
     bar->ws_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_set_name(bar->ws_box, "workspaces");
-    gtk_box_pack_start(GTK_BOX(left), bar->ws_box, FALSE, FALSE, 0);
+    GtkWidget *ws_ev = gtk_event_box_new();
+    gtk_widget_add_events(ws_ev, GDK_SCROLL_MASK);
+    g_signal_connect(ws_ev, "scroll-event", G_CALLBACK(ws_scrolled), NULL);
+    gtk_container_add(GTK_CONTAINER(ws_ev), bar->ws_box);
+    gtk_box_pack_start(GTK_BOX(left), ws_ev, FALSE, FALSE, 0);
 
     bar->mpris_event = gtk_button_new_with_label("");
     gtk_button_set_relief(GTK_BUTTON(bar->mpris_event), GTK_RELIEF_NONE);

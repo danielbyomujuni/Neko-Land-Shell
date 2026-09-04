@@ -43,35 +43,36 @@ window#nekobar {
 #rofi * { font-size: 12pt; }
 
 #workspaces {
-  margin-top: 12pt;
+  background: #181825;
+  border: solid 1px #1e1e2e;
+  border-radius: 7pt;
+  margin: 10pt 4pt 0 4pt;
+  padding: 5pt 0;
 }
 #workspaces button {
-  background: none;
+  background: #45475a;
   border: none;
   box-shadow: none;
-  padding: 2pt 0;
-  min-width: 0;
-  min-height: 0;
-  color: #585b70;
+  padding: 0;
+  min-width: 9px;
+  min-height: 9px;
+  border-radius: 5px;
+  margin: 3pt 0;
+  transition: min-height 180ms ease, background-color 150ms ease;
 }
-#workspaces button * { color: inherit; }
-#workspaces button:not(:first-child) {
-  margin-top: 4pt;
+#workspaces button:hover {
+  background: #9399b2;
+}
+#workspaces button.occupied {
+  background: #7f849c;
 }
 #workspaces button.visible {
-  color: #89b4fa;
+  background: #89b4fa;
+  min-height: 18px;
 }
 #workspaces button.active {
-  color: #f38ba8;
-}
-#workspaces button:hover,
-#workspaces button:focus {
-  background: none;
-  border-color: transparent;
-  box-shadow: none;
-}
-#workspaces button:hover:not(.active):not(.visible) {
-  color: #9399b2;
+  background: #f38ba8;
+  min-height: 26px;
 }
 
 #mpris {
