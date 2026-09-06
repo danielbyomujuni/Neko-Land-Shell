@@ -16,3 +16,6 @@ GtkWidget *displays_page_new(void);
 
 // wallpaper.c — hyprpaper-backed wallpaper picker
 GtkWidget *wallpaper_page_new(void);
+
+// midi.c — Sound page section: MIDI control → audio input bindings
+GtkWidget *midi_section_new(void);

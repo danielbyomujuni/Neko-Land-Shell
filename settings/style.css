@@ -598,3 +598,13 @@ window#adv-modal {
 .wp-pic {
   border-radius: 8px;
 }
+
+/* MIDI control rows: compact the dropdown so rows match device-row height */
+.midi-row {
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+.midi-row dropdown button {
+  min-height: 0;
+  padding: 2px 10px;
+}

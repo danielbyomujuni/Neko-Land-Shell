@@ -1,4 +1,4 @@
-PKGS = libadwaita-1 json-glib-1.0 libusb-1.0 lua5.4
+PKGS = libadwaita-1 json-glib-1.0 libusb-1.0 lua5.4 alsa
 CFLAGS ?= -O2 -Wall -Wextra
 CFLAGS += $(shell pkg-config --cflags $(PKGS))
 LDLIBS = $(shell pkg-config --libs $(PKGS)) -lm
@@ -6,7 +6,7 @@ LDLIBS = $(shell pkg-config --libs $(PKGS)) -lm
 SRC = src/main.c src/audio.c src/rgb.c src/rgb_common.c src/rgb_ene.c \
       src/rgb_hue2.c src/rgb_gpu.c src/rgb_asrock.c src/rgb_razer.c \
       src/rgb_logitech.c src/rgb_openrgb.c src/kraken_lcd.c src/displays.c \
-      src/wallpaper.c
+      src/wallpaper.c src/midi.c
 OBJ = $(SRC:.c=.o)
 
 # headless login-time RGB restore: providers + shared helpers, no UI
@@ -21,7 +21,8 @@ LCDD_LIBS = $(shell pkg-config --libs gdk-pixbuf-2.0 gthread-2.0 libusb-1.0)
 # process so the GTK versions never mix)
 IDENT_PKGS = gtk+-3.0 gtk-layer-shell-0
 
-all: nekoland-settings nekoland-lcdd nekoland-identify nekoland-rgb-restore
+all: nekoland-settings nekoland-lcdd nekoland-identify nekoland-rgb-restore \
+     nekoland-midid
 
 nekoland-settings: $(OBJ)
 	$(CC) -o $@ $(OBJ) $(LDLIBS)
@@ -31,6 +32,11 @@ nekoland-lcdd: src/lcdd_main.o src/kraken_lcd.o
 
 nekoland-rgb-restore: $(RESTORE_OBJ)
 	$(CC) -o $@ $(RESTORE_OBJ) $(LDLIBS)
+
+# MIDI→input daemon: just glib + alsa
+nekoland-midid: src/midid_main.o
+	$(CC) -o $@ src/midid_main.o \
+	  $(shell pkg-config --libs glib-2.0 alsa)
 
 src/identify_main.o: src/identify_main.c
 	$(CC) -O2 -Wall -Wextra \

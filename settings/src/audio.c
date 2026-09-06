@@ -902,6 +902,9 @@ GtkWidget *audio_page_new(void) {
     gtk_box_append(GTK_BOX(meter_card), form_row("Input level", meter));
     gtk_box_append(GTK_BOX(col), meter_card);
 
+    // MIDI control → input bindings (midi.c)
+    gtk_box_append(GTK_BOX(col), midi_section_new());
+
     // advanced button, bottom right
     GtkWidget *adv_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     GtkWidget *adv = gtk_button_new_with_label("Advanced…");
