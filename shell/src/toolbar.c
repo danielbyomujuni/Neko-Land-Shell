@@ -217,6 +217,9 @@ static gboolean viz_draw(GtkWidget *w, cairo_t *cr, gpointer data) {
         cairo_close_path(cr);
     }
     cairo_fill(cr);
+    // piano roll over the spectrum while a linked MIDI device plays
+    if (midiviz_active())
+        midiviz_draw(cr, rx, ry, rw, rh);
     return FALSE; // children (the content card) draw on top
 }
 
@@ -872,6 +875,20 @@ static void tb_check_monitoring(void) {
     }
     mon_on = count > 0;
     g_strlcpy(mon_src, mon_on ? first_src : "", sizeof(mon_src));
+    // piano-roll overlay: listen to the MIDI device linked to the
+    // monitored input (Sound page's MIDI CONTROL section)
+    char *mididev = NULL;
+    if (mon_on) {
+        char *mpath = g_build_filename(g_get_user_config_dir(), "nekoland",
+                                       "midi-map.conf", NULL);
+        GKeyFile *mkf = g_key_file_new();
+        if (g_key_file_load_from_file(mkf, mpath, G_KEY_FILE_NONE, NULL))
+            mididev = g_key_file_get_string(mkf, mon_src, "device", NULL);
+        g_key_file_free(mkf);
+        g_free(mpath);
+    }
+    midiviz_set_device(mididev);
+    g_free(mididev);
     if (mon_on) {
         // human name for the monitored input
         char *desc = NULL;

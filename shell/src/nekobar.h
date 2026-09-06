@@ -93,6 +93,11 @@ void osd_volume_show(void);
 GtkWidget *vr_widget_new(Bar *bar);
 void vr_start(void); // status poll timer
 
+// midiviz.c — piano-roll overlay for the toolbar visualizer
+void midiviz_set_device(const char *dev); // NULL/empty stops listening
+gboolean midiviz_active(void);
+void midiviz_draw(cairo_t *cr, double x, double y, double w, double h);
+
 // toolbar.c — context toolbar sliding from the top (YouTube Music etc.)
 void toolbar_start(void);
 void toolbar_refocus(void); // re-evaluate per-monitor mode (focused app)
