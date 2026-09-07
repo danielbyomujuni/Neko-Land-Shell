@@ -1,0 +1,28 @@
+/* Colors reference the theme's named palette (@dialog_bg_color etc.) so a
+   GTK theme/flavor switch restyles the app, same as settings/style.css.
+
+   With libadwaita-without-adwaita installed the stock Adwaita stylesheet is
+   stripped, and the catppuccin gtk4 theme predates AdwDialog's
+   floating-sheet nodes — so all the modal chrome (scrim, surface, radius,
+   shadow) has to be provided here or the dialog renders as a flat square. */
+
+floating-sheet > dimming {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+floating-sheet > sheet {
+  background-color: @dialog_bg_color;
+  color: @dialog_fg_color;
+  border: 1px solid @borders;
+  border-radius: 15px;
+  box-shadow: 0 2px 8px 2px rgba(0, 0, 0, 0.2),
+              0 6px 32px 16px rgba(0, 0, 0, 0.12);
+}
+
+/* flat dialog headerbar: same surface as the sheet, tucked into its
+   rounded top corners */
+floating-sheet > sheet headerbar {
+  background: @dialog_bg_color;
+  box-shadow: none;
+  border-radius: 14px 14px 0 0;
+}
