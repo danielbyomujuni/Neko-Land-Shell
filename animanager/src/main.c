@@ -27,6 +27,8 @@ static GPtrArray *folder_rows; // AdwActionRow* currently in folders_group
 
 static GPtrArray *folders; // char* — configured anime directories
 
+static void library_refresh(void);
+
 // ---------------------------------------------------------------- config --
 
 static char *config_path(void) {
@@ -654,13 +656,42 @@ static void on_episode_activated(AdwActionRow *row, gpointer data) {
     g_object_unref(file);
 }
 
+// one episode group registered on a series page, for the manual refresh
+typedef struct {
+    char *search;
+    GtkWidget *label; // ref'd
+    int local;
+} PageGroup;
+
+static void page_group_free(gpointer p) {
+    PageGroup *g = p;
+    g_free(g->search);
+    g_object_unref(g->label);
+    g_free(g);
+}
+
+// pending manual-refresh state; re-enables the button when done
+typedef struct {
+    GtkWidget *button; // ref'd
+    int pending;
+} RefreshCtx;
+
 typedef struct {
     GtkWidget *label; // ref'd
     int local;
+    RefreshCtx *ctx; // NULL for the automatic page-load lookup
 } PageAniReq;
 
 static void page_ani_done(const AniInfo *info, gpointer data) {
     PageAniReq *req = data;
+    gtk_widget_remove_css_class(req->label, "missing-label");
+    gtk_widget_remove_css_class(req->label, "dim-label");
+    if (info && !info->ok && req->ctx) {
+        gtk_label_set_text(GTK_LABEL(req->label),
+                           "AniList lookup failed (API down or no match)");
+        gtk_widget_add_css_class(req->label, "dim-label");
+        gtk_widget_set_visible(req->label, TRUE);
+    }
     if (info && info->ok) {
         int expected = info->airing ? info->aired : info->episodes;
         if (expected > 0) {
@@ -681,15 +712,45 @@ static void page_ani_done(const AniInfo *info, gpointer data) {
             gtk_widget_set_visible(req->label, TRUE);
         }
     }
+    if (req->ctx && --req->ctx->pending == 0) {
+        gtk_widget_set_sensitive(req->ctx->button, TRUE);
+        g_object_unref(req->ctx->button);
+        g_free(req->ctx);
+        library_refresh(); // badges and season groups use the same cache
+    }
     g_object_unref(req->label);
     g_free(req);
 }
 
+static void on_page_refresh(GtkButton *btn, gpointer data) {
+    GPtrArray *groups = data;
+    if (groups->len == 0)
+        return;
+    RefreshCtx *ctx = g_new0(RefreshCtx, 1);
+    ctx->button = g_object_ref(GTK_WIDGET(btn));
+    ctx->pending = groups->len;
+    gtk_widget_set_sensitive(GTK_WIDGET(btn), FALSE);
+    for (guint i = 0; i < groups->len; i++) {
+        PageGroup *g = groups->pdata[i];
+        gtk_widget_remove_css_class(g->label, "missing-label");
+        gtk_widget_add_css_class(g->label, "dim-label");
+        gtk_label_set_text(GTK_LABEL(g->label), "Checking AniList…");
+        gtk_widget_set_visible(g->label, TRUE);
+        PageAniReq *req = g_new0(PageAniReq, 1);
+        req->label = g_object_ref(g->label);
+        req->local = g->local;
+        req->ctx = ctx;
+        anilist_refresh(g->search, page_ani_done, req);
+    }
+}
+
 // boxed list of the videos in one directory, under a heading; returns the
 // episode count (0 = nothing appended). search is the AniList term for
-// this group (NULL to skip the lookup).
+// this group (NULL to skip the lookup); the group is also registered in
+// page_groups for the manual refresh button.
 static int append_episode_group(GtkWidget *box, const char *title,
-                                const char *dir_path, const char *search) {
+                                const char *dir_path, const char *search,
+                                GPtrArray *page_groups) {
     GPtrArray *files = g_ptr_array_new_with_free_func(g_free);
     GDir *dir = g_dir_open(dir_path, 0, NULL);
     if (dir) {
@@ -740,6 +801,13 @@ static int append_episode_group(GtkWidget *box, const char *title,
             req->label = g_object_ref(ani);
             req->local = n;
             anilist_lookup(search, page_ani_done, req);
+            if (page_groups) {
+                PageGroup *g = g_new0(PageGroup, 1);
+                g->search = g_strdup(search);
+                g->label = g_object_ref(ani);
+                g->local = n;
+                g_ptr_array_add(page_groups, g);
+            }
         }
 
         GtkWidget *list = gtk_list_box_new();
@@ -838,13 +906,17 @@ static void open_series(const char *path, const char *name,
     }
     g_ptr_array_sort(subdirs, verscmp);
 
+    GPtrArray *page_groups =
+        g_ptr_array_new_with_free_func(page_group_free);
     GArray *season_nums = g_array_new(FALSE, FALSE, sizeof(int));
-    episodes += append_episode_group(content, "Episodes", path, name);
+    episodes += append_episode_group(content, "Episodes", path, name,
+                                     page_groups);
     for (guint i = 0; i < subdirs->len; i++) {
         char *sub = g_build_filename(path, subdirs->pdata[i], NULL);
         char *search = g_strdup_printf("%s %s", name,
                                        (char *)subdirs->pdata[i]);
-        int n = append_episode_group(content, subdirs->pdata[i], sub, search);
+        int n = append_episode_group(content, subdirs->pdata[i], sub, search,
+                                     page_groups);
         g_free(search);
         if (n > 0) {
             seasons++;
@@ -895,10 +967,21 @@ static void open_series(const char *path, const char *name,
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), clamp);
 
     GtkWidget *view = adw_toolbar_view_new();
-    adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(view), adw_header_bar_new());
+    GtkWidget *header = adw_header_bar_new();
+    GtkWidget *refresh =
+        gtk_button_new_from_icon_name("view-refresh-symbolic");
+    gtk_widget_set_tooltip_text(refresh,
+                                "Refresh episode counts from AniList");
+    g_signal_connect(refresh, "clicked", G_CALLBACK(on_page_refresh),
+                     page_groups);
+    adw_header_bar_pack_end(ADW_HEADER_BAR(header), refresh);
+    adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(view), header);
     adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(view), scroll);
 
     AdwNavigationPage *page = adw_navigation_page_new(view, name);
+    // the groups live exactly as long as the page
+    g_object_set_data_full(G_OBJECT(page), "page-groups", page_groups,
+                           (GDestroyNotify)g_ptr_array_unref);
     adw_navigation_view_push(ADW_NAVIGATION_VIEW(nav_view), page);
 }
 

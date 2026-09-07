@@ -277,9 +277,10 @@ static gboolean idle_reply(gpointer data) {
     return G_SOURCE_REMOVE;
 }
 
-void anilist_lookup(const char *search, AniCallback cb, gpointer data) {
+static void lookup_full(const char *search, gboolean force, AniCallback cb,
+                        gpointer data) {
     CacheEntry *e = g_hash_table_lookup(cache, search);
-    if (e && entry_fresh(e)) {
+    if (!force && e && entry_fresh(e)) {
         IdleReply *r = g_new0(IdleReply, 1);
         r->key = g_strdup(search);
         r->cb = cb;
@@ -298,7 +299,19 @@ void anilist_lookup(const char *search, AniCallback cb, gpointer data) {
     if (in_flight)
         return; // request already queued or running
 
-    g_queue_push_tail(&queue, g_strdup(search));
+    // manual refreshes jump ahead of the background backlog
+    if (force)
+        g_queue_push_head(&queue, g_strdup(search));
+    else
+        g_queue_push_tail(&queue, g_strdup(search));
     if (!timer)
         timer = g_timeout_add(REQUEST_INTERVAL_MS, process_queue, NULL);
+}
+
+void anilist_lookup(const char *search, AniCallback cb, gpointer data) {
+    lookup_full(search, FALSE, cb, data);
+}
+
+void anilist_refresh(const char *search, AniCallback cb, gpointer data) {
+    lookup_full(search, TRUE, cb, data);
 }

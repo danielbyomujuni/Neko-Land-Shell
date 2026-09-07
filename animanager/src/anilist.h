@@ -19,3 +19,5 @@ void anilist_init(void);
 // Cached + rate-limited async lookup; cb always fires exactly once (with
 // info->ok=FALSE when the API is down or nothing matched).
 void anilist_lookup(const char *search, AniCallback cb, gpointer user_data);
+// Same, but bypasses the cache and re-fetches (still rate-limited).
+void anilist_refresh(const char *search, AniCallback cb, gpointer user_data);
