@@ -503,9 +503,7 @@ static int aired_expected(const AniInfo *info, gboolean *partial) {
     if (info->aired > 0)
         return info->aired;
     int y, m, d;
-    // estimate only when the total is known: long-running shows with an
-    // unknown episode count would produce huge bogus week counts
-    if (info->episodes > 0 && info->start_date &&
+    if (info->start_date &&
         sscanf(info->start_date, "%d-%d-%d", &y, &m, &d) == 3) {
         GDateTime *start = g_date_time_new_local(y, m, d, 0, 0, 0);
         if (start) {
@@ -517,9 +515,13 @@ static int aired_expected(const AniInfo *info, gboolean *partial) {
             int est = weeks + 1; // weekly broadcast assumption
             if (est < 0)
                 est = 0;
-            if (est > info->episodes)
-                est = info->episodes;
-            return est;
+            if (info->episodes > 0)
+                return MIN(est, info->episodes);
+            // no listed total (kitsu often lacks one while airing): trust
+            // the estimate only at seasonal scale — a years-long franchise
+            // would produce a huge bogus week count
+            if (est <= 26)
+                return est;
         }
     }
     return -1;
@@ -760,6 +762,17 @@ static void page_ani_done(const AniInfo *info, gpointer data) {
             }
             gtk_label_set_text(GTK_LABEL(req->label), txt);
             g_free(txt);
+            gtk_widget_set_visible(req->label, TRUE);
+        } else {
+            // matched, but nothing comparable — say so instead of leaving
+            // the line blank as if the lookup went nowhere
+            char *txt = g_strdup_printf(
+                "%s: %s — no episode count listed",
+                info->source ? info->source : "AniList",
+                info->title ? info->title : "?");
+            gtk_label_set_text(GTK_LABEL(req->label), txt);
+            g_free(txt);
+            gtk_widget_add_css_class(req->label, "dim-label");
             gtk_widget_set_visible(req->label, TRUE);
         }
     }
