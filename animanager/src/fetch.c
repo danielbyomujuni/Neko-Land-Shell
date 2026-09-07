@@ -515,6 +515,8 @@ void fetch_search(FetchProvider provider, const char *show, int episode,
 // Looked up fresh on every call: the user may install aria2c while the
 // dialog is open, and a stale negative would keep hiding auto-download.
 gboolean fetch_have_aria2(void) {
+    if (g_getenv("NEKOLAND_FETCH_NO_ARIA2")) // test override
+        return FALSE;
     char *p = g_find_program_in_path("aria2c");
     gboolean have = p != NULL;
     g_free(p);
@@ -528,18 +530,29 @@ gboolean fetch_have_aria2(void) {
     "automatically"
 
 typedef struct {
-    FetchDlCallback cb;
-    gpointer data;
+    FetchDlHandlers h; // shallow copy; h.data is the caller's context
     FetchResult *res; // copy
     char *dest;
     char *torrent_file; // saved path, or NULL
     gboolean use_aria2; // captured at start
+    // aria2c progress reader state
+    GDataInputStream *dout;
+    GCancellable *cancel;
+    int last_pct;   // -1 until the first progress line
+    char *last_speed;
+    gboolean aria2_ok;
+    gboolean exited;
+    gboolean reader_done;
+    gboolean finished;
 } DlCtx;
 
 static void dl_ctx_free(DlCtx *c) {
     fetch_result_free(c->res);
     g_free(c->dest);
     g_free(c->torrent_file);
+    g_clear_object(&c->dout);
+    g_clear_object(&c->cancel);
+    g_free(c->last_speed);
     g_free(c);
 }
 
@@ -558,35 +571,121 @@ static char *sanitize_filename(const char *title) {
     return g_string_free(g, FALSE);
 }
 
-static void dl_finish(DlCtx *c, gboolean ok, const char *msg) {
-    c->cb(ok, msg, c->data);
+static void dl_do_finish(DlCtx *c, gboolean ok, const char *msg) {
+    if (c->finished)
+        return;
+    c->finished = TRUE;
+    // no read is ever in flight here (the reader stopped before calling
+    // this, or never started), so freeing is safe
+    if (ok && c->last_pct >= 0 && c->last_pct < 100 && c->h.progress)
+        c->h.progress(100, c->last_speed, c->h.data);
+    c->h.done(ok, msg, c->h.data);
     dl_ctx_free(c);
+}
+
+// aria2c progress lines look like:
+//   [#2089b0 400.0MiB/1.4GiB(12%) CN:4 DL:2.0MiB]
+// (--summary-interval=1 reprints them every second.) Both halves are
+// matched tolerantly; anything else is ignored.
+static GRegex *re_pct = NULL; // \((\d+)%\)
+static GRegex *re_spd = NULL; // DL:2.0MiB (unit-anchored, no trailing ])
+
+static void report_progress(DlCtx *c, int pct, const char *speed) {
+    pct = CLAMP(pct, 0, 100);
+    c->last_pct = pct;
+    if (speed) {
+        g_free(c->last_speed);
+        c->last_speed = g_strdup(speed);
+    }
+    if (c->h.progress)
+        c->h.progress(pct, c->last_speed, c->h.data);
+}
+
+static void parse_aria2_line(DlCtx *c, const char *line) {
+    if (!re_pct) {
+        re_pct = g_regex_new("\\((\\d+)%\\)", 0, 0, NULL);
+        re_spd = g_regex_new("\\bDL:([0-9.]+(?:[KMGTPE]i)?B)", 0, 0, NULL);
+    }
+    GMatchInfo *mi = NULL;
+    int pct = -1;
+    if (g_regex_match(re_pct, line, 0, &mi)) {
+        char *n = g_match_info_fetch(mi, 1);
+        pct = atoi(n);
+        g_free(n);
+    }
+    g_match_info_free(mi);
+    char *sp = NULL;
+    if (g_regex_match(re_spd, line, 0, &mi))
+        sp = g_match_info_fetch(mi, 1);
+    g_match_info_free(mi);
+    if (pct >= 0)
+        report_progress(c, pct, sp);
+    else if (sp && c->last_pct >= 0 && c->h.progress)
+        c->h.progress(c->last_pct, sp, c->h.data);
+    g_free(sp);
+}
+
+static void aria2_read_cb(GObject *src, GAsyncResult *res, gpointer data) {
+    DlCtx *c = data;
+    if (c->finished)
+        return;
+    GError *err = NULL;
+    char *line = g_data_input_stream_read_line_finish(
+        G_DATA_INPUT_STREAM(src), res, NULL, &err);
+    g_clear_error(&err);
+    if (line) {
+        parse_aria2_line(c, line);
+        g_free(line);
+        g_data_input_stream_read_line_async(c->dout, G_PRIORITY_DEFAULT,
+                                            c->cancel, aria2_read_cb, c);
+        return;
+    }
+    // EOF or cancelled: the reader is done; finish if aria2 already exited
+    c->reader_done = TRUE;
+    if (c->exited)
+        dl_do_finish(c, c->aria2_ok,
+                     c->aria2_ok ? "Video downloaded to folder"
+                                 : "aria2c failed");
 }
 
 static void on_aria2_exit(GObject *src, GAsyncResult *res,
                            gpointer data) {
     DlCtx *c = data;
-    gboolean ok = g_subprocess_wait_finish(G_SUBPROCESS(src), res, NULL);
-    dl_finish(c, ok, ok ? "Video downloaded to folder" : "aria2c failed");
+    if (c->finished)
+        return;
+    c->aria2_ok = g_subprocess_wait_finish(G_SUBPROCESS(src), res, NULL);
+    c->exited = TRUE;
+    if (c->reader_done) {
+        dl_do_finish(c, c->aria2_ok,
+                     c->aria2_ok ? "Video downloaded to folder"
+                                 : "aria2c failed");
+    } else if (c->cancel) {
+        g_cancellable_cancel(c->cancel); // reader callback finalizes
+    }
 }
 
 static void spawn_aria2(DlCtx *c) {
     const char *source = c->res->magnet ? c->res->magnet : c->torrent_file;
     if (!source) {
-        dl_finish(c, FALSE, "No magnet or torrent");
+        dl_do_finish(c, FALSE, "No magnet or torrent");
         return;
     }
     char *dir = g_strdup_printf("--dir=%s", c->dest);
     GSubprocess *proc = g_subprocess_new(
-        G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
+        G_SUBPROCESS_FLAGS_STDOUT_PIPE |
             G_SUBPROCESS_FLAGS_STDERR_SILENCE,
         NULL, "aria2c", dir, "--seed-time=0", "--bt-enable-lpd=true",
-        source, NULL);
+        "--summary-interval=1", source, NULL);
     g_free(dir);
     if (!proc) {
-        dl_finish(c, FALSE, "Could not launch aria2c");
+        dl_do_finish(c, FALSE, "Could not launch aria2c");
         return;
     }
+    GInputStream *out = g_subprocess_get_stdout_pipe(proc);
+    c->cancel = g_cancellable_new();
+    c->dout = g_data_input_stream_new(out);
+    g_data_input_stream_read_line_async(c->dout, G_PRIORITY_DEFAULT,
+                                        c->cancel, aria2_read_cb, c);
     g_subprocess_wait_async(proc, NULL, on_aria2_exit, c);
     g_object_unref(proc);
 }
@@ -599,9 +698,9 @@ static void on_torrent_saved(GObject *src, GAsyncResult *res,
         // Without aria2c a failed .torrent save leaves nothing behind.
         g_clear_pointer(&c->torrent_file, g_free);
         if (!c->use_aria2 || !c->res->magnet) {
-            dl_finish(c, FALSE,
-                      c->use_aria2 ? "Torrent download failed"
-                                   : NEED_ARIA2_MSG);
+            dl_do_finish(c, FALSE,
+                         c->use_aria2 ? "Torrent download failed"
+                                      : NEED_ARIA2_MSG);
             return;
         }
     }
@@ -611,22 +710,22 @@ static void on_torrent_saved(GObject *src, GAsyncResult *res,
         // No auto-downloader: the saved .torrent is all we can place
         // correctly. Never xdg-open the magnet — the torrent client would
         // download the video into its own folder, not this one.
-        dl_finish(c, TRUE, TORRENT_ONLY_MSG);
+        dl_do_finish(c, TRUE, TORRENT_ONLY_MSG);
     }
 }
 
 void fetch_download(const FetchResult *res, const char *dest_dir,
-                    FetchDlCallback cb, gpointer user_data) {
+                    const FetchDlHandlers *h) {
     DlCtx *c = g_new0(DlCtx, 1);
-    c->cb = cb;
-    c->data = user_data;
+    c->h = *h;
     c->res = result_copy(res);
     c->dest = g_strdup(dest_dir);
+    c->last_pct = -1;
     c->use_aria2 = fetch_have_aria2();
     if (!c->use_aria2 && !res->torrent_url) {
         // Magnet-only release (SubsPlease) with no tool that can fetch it
         // into this folder: say so instead of mis-downloading elsewhere.
-        dl_finish(c, FALSE, NEED_ARIA2_MSG);
+        dl_do_finish(c, FALSE, NEED_ARIA2_MSG);
         return;
     }
     if (res->torrent_url && res->title) {
@@ -645,9 +744,9 @@ void fetch_download(const FetchResult *res, const char *dest_dir,
         }
         g_clear_pointer(&c->torrent_file, g_free);
         if (!c->use_aria2 || !c->res->magnet) {
-            dl_finish(c, FALSE,
-                      c->use_aria2 ? "Torrent download failed"
-                                   : NEED_ARIA2_MSG);
+            dl_do_finish(c, FALSE,
+                         c->use_aria2 ? "Torrent download failed"
+                                      : NEED_ARIA2_MSG);
             return;
         }
     }
@@ -682,6 +781,7 @@ typedef struct {
     int episode;
     GtkWidget *row;     // borrowed: AdwActionRow in the list
     GtkWidget *spinner; // borrowed
+    GtkWidget *bar;     // borrowed: progress, visible while downloading
     GtkWidget *dl_btn;  // borrowed
     GtkWidget *copy_btn; // borrowed
     FetchResult *result; // owned
@@ -946,15 +1046,38 @@ static void on_dl_done(gboolean ok, const char *message, gpointer data) {
         if (ok) {
             miss_set_status(m, message, FALSE);
             gtk_widget_set_visible(m->dl_btn, FALSE);
+            gtk_widget_set_visible(m->bar, FALSE);
         } else {
             char *txt = g_strdup_printf("Failed: %s", message);
             miss_set_status(m, txt, FALSE);
             g_free(txt);
+            gtk_widget_set_visible(m->bar, FALSE);
             gtk_widget_set_sensitive(m->dl_btn, TRUE);
         }
         update_summary(dlg);
     }
     dlg_op_done(dlg);
+}
+
+static void miss_progress(int percent, const char *speed, gpointer data) {
+    MissEp *m = data;
+    FetchDlg *dlg = m->dlg;
+    if (dlg->closed)
+        return;
+    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(m->bar),
+                                  CLAMP(percent, 0, 100) / 100.0);
+    char *txt;
+    if (speed && *speed) {
+        char *sp = g_str_has_suffix(speed, "/s") ? g_strdup(speed)
+                                                 : g_strdup_printf("%s/s",
+                                                                   speed);
+        txt = g_strdup_printf("%d%% · %s", percent, sp);
+        g_free(sp);
+    } else {
+        txt = g_strdup_printf("%d%%", percent);
+    }
+    miss_set_status(m, txt, TRUE);
+    g_free(txt);
 }
 
 static void start_download(MissEp *m) {
@@ -966,11 +1089,14 @@ static void start_download(MissEp *m) {
         miss_set_status(m, fetch_have_aria2() ? "Downloading…"
                                               : "Saving torrent…",
                         TRUE);
+        gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(m->bar), 0.0);
+        gtk_widget_set_visible(m->bar, fetch_have_aria2());
         gtk_widget_set_sensitive(m->dl_btn, FALSE);
         update_summary(dlg);
     }
     dlg_op_start(dlg);
-    fetch_download(m->result, m->group->dir, on_dl_done, m);
+    FetchDlHandlers h = {on_dl_done, miss_progress, m};
+    fetch_download(m->result, m->group->dir, &h);
 }
 
 static void on_dl_clicked(GtkButton *btn, gpointer data) {
@@ -1012,6 +1138,7 @@ static void results_reset(FetchDlg *dlg) {
             miss_set_status(m, "Not searched yet", FALSE);
             gtk_widget_set_visible(m->dl_btn, FALSE);
             gtk_widget_set_visible(m->copy_btn, FALSE);
+            gtk_widget_set_visible(m->bar, FALSE);
         }
     }
     if (!dlg->closed) {
@@ -1074,6 +1201,12 @@ static MissEp *miss_add_row(FetchDlg *dlg, FetchGroup *g, int gidx, int ep) {
     gtk_widget_set_valign(m->spinner, GTK_ALIGN_CENTER);
     gtk_widget_set_visible(m->spinner, FALSE);
     adw_action_row_add_suffix(ADW_ACTION_ROW(row), m->spinner);
+
+    m->bar = gtk_progress_bar_new();
+    gtk_widget_set_size_request(m->bar, 110, -1);
+    gtk_widget_set_valign(m->bar, GTK_ALIGN_CENTER);
+    gtk_widget_set_visible(m->bar, FALSE);
+    adw_action_row_add_suffix(ADW_ACTION_ROW(row), m->bar);
 
     m->copy_btn = gtk_button_new_from_icon_name("edit-copy-symbolic");
     gtk_widget_add_css_class(m->copy_btn, "flat");

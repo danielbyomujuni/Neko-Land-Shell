@@ -34,14 +34,19 @@ typedef void (*FetchCallback)(GPtrArray *results, gpointer user_data);
 void fetch_search(FetchProvider provider, const char *show, int episode,
                   const char *quality, FetchCallback cb, gpointer user_data);
 
-// Save the .torrent (when known) into dest_dir, then hand the magnet/torrent
-// to a downloader: aria2c straight into dest_dir when available, otherwise
-// the desktop's torrent client via xdg-open. cb fires once on completion
-// (for xdg-open: once the client was launched).
-typedef void (*FetchDlCallback)(gboolean ok, const char *message,
-                                gpointer user_data);
+// Save the .torrent (when known) into dest_dir, then fetch the video with
+// aria2c straight into dest_dir. Without aria2c only the .torrent can be
+// placed (magnet-only releases fail with an install hint).
+//
+// done fires once on completion. progress fires as aria2c reports (percent
+// 0–100, speed like "2.0MiB/s" or NULL); both fire on the main loop.
+typedef struct {
+    void (*done)(gboolean ok, const char *message, gpointer data);
+    void (*progress)(int percent, const char *speed, gpointer data);
+    gpointer data;
+} FetchDlHandlers;
 void fetch_download(const FetchResult *res, const char *dest_dir,
-                    FetchDlCallback cb, gpointer user_data);
+                    const FetchDlHandlers *h);
 
 gboolean fetch_have_aria2(void);
 
