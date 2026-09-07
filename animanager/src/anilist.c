@@ -1,13 +1,18 @@
-// AniList GraphQL lookups: async via curl subprocess, answers cached in
-// ~/.cache/nekoland/animanager-anilist.ini, requests queued at one per 2s
-// (their public rate limit is 30/min). No auth needed for public queries.
+// Anime metadata lookups: AniList GraphQL first, falling back to Kitsu
+// (kitsu.io JSON:API) when AniList is down or has no match. Async via curl
+// subprocess, answers cached in ~/.cache/nekoland/animanager-anilist.ini,
+// requests queued at one per 2s (AniList's public limit is 30/min; a
+// fallback adds one extra request inside the same slot). No auth needed.
 
 #include "anilist.h"
+
+#include <stdio.h>
 
 #include <gio/gio.h>
 #include <json-glib/json-glib.h>
 
 #define ANILIST_URL "https://graphql.anilist.co"
+#define KITSU_URL "https://kitsu.io/api/edge/anime"
 #define REQUEST_INTERVAL_MS 2000
 #define TTL_FINISHED (7 * 24 * 3600) // finished shows don't change
 #define TTL_AIRING (6 * 3600)        // airing counts move weekly
@@ -33,6 +38,11 @@ static const char *service_url(void) {
     return env ? env : ANILIST_URL;
 }
 
+static const char *kitsu_url(void) {
+    const char *env = g_getenv("NEKOLAND_KITSU_URL"); // test override
+    return env ? env : KITSU_URL;
+}
+
 // ----------------------------------------------------------------- cache --
 
 static char *cache_path(void) {
@@ -44,6 +54,7 @@ static void cache_entry_free(gpointer p) {
     CacheEntry *e = p;
     g_free(e->info.title);
     g_free(e->info.season);
+    g_free(e->info.source);
     g_free(e);
 }
 
@@ -66,6 +77,8 @@ static void cache_load(void) {
                 g_key_file_get_string(kf, groups[i], "title", NULL);
             e->info.season =
                 g_key_file_get_string(kf, groups[i], "season", NULL);
+            e->info.source =
+                g_key_file_get_string(kf, groups[i], "source", NULL);
             e->info.season_year = g_key_file_has_key(kf, groups[i],
                                                      "season-year", NULL)
                                       ? g_key_file_get_integer(
@@ -102,6 +115,8 @@ static void cache_save(void) {
             g_key_file_set_string(kf, key, "title", e->info.title);
         if (e->info.season)
             g_key_file_set_string(kf, key, "season", e->info.season);
+        if (e->info.source)
+            g_key_file_set_string(kf, key, "source", e->info.source);
         g_key_file_set_integer(kf, key, "season-year", e->info.season_year);
         g_key_file_set_int64(kf, key, "fetched", e->fetched);
     }
@@ -141,6 +156,101 @@ static CacheEntry *store_miss(const char *key) {
     return e;
 }
 
+// ---------------------------------------------------- kitsu.io fallback --
+
+static void on_kitsu_done(GObject *src, GAsyncResult *res, gpointer data) {
+    char *key = data;
+    char *out = NULL;
+    CacheEntry *e = NULL;
+
+    if (g_subprocess_communicate_utf8_finish(G_SUBPROCESS(src), res, &out,
+                                             NULL, NULL) &&
+        out) {
+        JsonParser *parser = json_parser_new();
+        if (json_parser_load_from_data(parser, out, -1, NULL)) {
+            JsonNode *root_node = json_parser_get_root(parser);
+            JsonObject *root = root_node && JSON_NODE_HOLDS_OBJECT(root_node)
+                                   ? json_node_get_object(root_node)
+                                   : NULL;
+            JsonArray *arr =
+                root && json_object_has_member(root, "data") &&
+                        !json_object_get_null_member(root, "data")
+                    ? json_object_get_array_member(root, "data")
+                    : NULL;
+            if (arr && json_array_get_length(arr) > 0) {
+                JsonObject *attr = json_object_get_object_member(
+                    json_array_get_object_element(arr, 0), "attributes");
+                if (attr) {
+                    e = store_miss(key);
+                    e->info.ok = TRUE;
+                    e->info.source = g_strdup("Kitsu");
+                    if (json_object_has_member(attr, "episodeCount") &&
+                        !json_object_get_null_member(attr, "episodeCount"))
+                        e->info.episodes = json_object_get_int_member(
+                            attr, "episodeCount");
+                    const char *status =
+                        json_object_has_member(attr, "status")
+                            ? json_object_get_string_member(attr, "status")
+                            : "";
+                    e->info.airing = g_strcmp0(status, "current") == 0;
+                    if (json_object_has_member(attr, "canonicalTitle"))
+                        e->info.title =
+                            g_strdup(json_object_get_string_member(
+                                attr, "canonicalTitle"));
+                    // season/year from the premiere date
+                    const char *start =
+                        json_object_has_member(attr, "startDate") &&
+                                !json_object_get_null_member(attr,
+                                                             "startDate")
+                            ? json_object_get_string_member(attr,
+                                                            "startDate")
+                            : NULL;
+                    int y, m;
+                    if (start && sscanf(start, "%d-%d", &y, &m) == 2 &&
+                        m >= 1 && m <= 12) {
+                        static const char *names[] = {"WINTER", "SPRING",
+                                                      "SUMMER", "FALL"};
+                        e->info.season = g_strdup(names[(m - 1) / 3]);
+                        e->info.season_year = y;
+                    }
+                }
+            }
+        }
+        g_object_unref(parser);
+    }
+    g_free(out);
+
+    if (!e)
+        store_miss(key);
+    cache_save();
+    notify_waiters(key);
+    g_free(key);
+}
+
+// AniList gave nothing (down or no match) — same key against Kitsu.
+// Consumes key.
+static void kitsu_fetch(char *key) {
+    char *q = g_uri_escape_string(key, NULL, FALSE);
+    char *url =
+        g_strdup_printf("%s?filter[text]=%s&page[limit]=1", kitsu_url(), q);
+    g_free(q);
+    GSubprocess *proc = g_subprocess_new(
+        G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+        NULL, "curl", "-s", "--globoff", "-m", "15", "-H",
+        "Accept: application/vnd.api+json", url, NULL);
+    g_free(url);
+    if (proc) {
+        g_subprocess_communicate_utf8_async(proc, NULL, NULL, on_kitsu_done,
+                                            key);
+        g_object_unref(proc);
+    } else {
+        store_miss(key);
+        cache_save();
+        notify_waiters(key);
+        g_free(key);
+    }
+}
+
 static void on_curl_done(GObject *src, GAsyncResult *res, gpointer data) {
     char *key = data;
     char *out = NULL;
@@ -166,6 +276,7 @@ static void on_curl_done(GObject *src, GAsyncResult *res, gpointer data) {
             if (media) {
                 e = store_miss(key);
                 e->info.ok = TRUE;
+                e->info.source = g_strdup("AniList");
                 if (json_object_has_member(media, "episodes") &&
                     !json_object_get_null_member(media, "episodes"))
                     e->info.episodes =
@@ -202,8 +313,10 @@ static void on_curl_done(GObject *src, GAsyncResult *res, gpointer data) {
     }
     g_free(out);
 
-    if (!e)
-        store_miss(key); // API down, no match, or parse failure
+    if (!e) {
+        kitsu_fetch(key); // AniList down, no match, or parse failure
+        return;
+    }
     cache_save();
     notify_waiters(key);
     g_free(key);
@@ -296,8 +409,20 @@ static void lookup_full(const char *search, gboolean force, AniCallback cb,
     gboolean in_flight = list != NULL;
     list = g_slist_append(list, w);
     g_hash_table_replace(waiters, g_strdup(search), list);
-    if (in_flight)
-        return; // request already queued or running
+    if (in_flight) {
+        // a request for this key is already queued or running; a manual
+        // sync still promotes the queued copy ahead of the backlog (if it
+        // hasn't been dispatched yet — a running one can't be moved)
+        if (force) {
+            GList *link = g_queue_find_custom(&queue, search,
+                                              (GCompareFunc)g_strcmp0);
+            if (link && link != queue.head) {
+                g_queue_unlink(&queue, link);
+                g_queue_push_head_link(&queue, link);
+            }
+        }
+        return;
+    }
 
     // manual refreshes jump ahead of the background backlog
     if (force)

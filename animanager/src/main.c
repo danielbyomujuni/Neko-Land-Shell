@@ -491,14 +491,16 @@ static void card_ani_done(const AniInfo *info, gpointer data) {
     CardAni *agg = req->agg;
 
     if (info && info->ok) {
-        int expected = info->airing ? info->aired : info->episodes;
+        int expected = (info->airing && info->aired > 0) ? info->aired
+                                                         : info->episodes;
+        gboolean partial = info->airing && info->aired > 0;
         if (expected > 0 && req->local < expected) {
             agg->shortfall += expected - req->local;
             if (agg->tip->len)
                 g_string_append_c(agg->tip, '\n');
             g_string_append_printf(agg->tip, "%s: have %d of %d%s", req->label,
                                    req->local, expected,
-                                   info->airing ? " aired" : "");
+                                   partial ? " aired" : "");
         }
     }
 
@@ -693,18 +695,23 @@ static void page_ani_done(const AniInfo *info, gpointer data) {
         gtk_widget_set_visible(req->label, TRUE);
     }
     if (info && info->ok) {
-        int expected = info->airing ? info->aired : info->episodes;
+        // prefer episodes-aired-so-far for airing shows, but fall back to
+        // the total when the provider (e.g. Kitsu) doesn't report it
+        int expected = (info->airing && info->aired > 0) ? info->aired
+                                                         : info->episodes;
+        gboolean partial = info->airing && info->aired > 0;
         if (expected > 0) {
             char *txt;
+            const char *src = info->source ? info->source : "AniList";
             if (req->local < expected) {
-                txt = g_strdup_printf("Have %d of %d%s — AniList: %s",
-                                      req->local, expected,
-                                      info->airing ? " aired" : "",
+                txt = g_strdup_printf("Have %d of %d%s — %s: %s", req->local,
+                                      expected, partial ? " aired" : "", src,
                                       info->title ? info->title : "?");
                 gtk_widget_add_css_class(req->label, "missing-label");
             } else {
-                txt = g_strdup_printf("Complete — %d episode%s on AniList",
-                                      expected, expected == 1 ? "" : "s");
+                txt = g_strdup_printf("Complete — %d episode%s on %s",
+                                      expected, expected == 1 ? "" : "s",
+                                      src);
                 gtk_widget_add_css_class(req->label, "dim-label");
             }
             gtk_label_set_text(GTK_LABEL(req->label), txt);
