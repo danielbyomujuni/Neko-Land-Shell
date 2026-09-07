@@ -11,6 +11,7 @@ typedef struct {
     char *season;   // "WINTER"/"SPRING"/"SUMMER"/"FALL", NULL if unknown
     int season_year; // e.g. 2023, -1 if unknown
     char *source;   // "AniList" or "Kitsu" (fallback provider)
+    char *start_date; // premiere "YYYY-MM-DD", NULL if unknown
 } AniInfo;
 
 // Called on the main loop. info is owned by the cache — copy what you keep.

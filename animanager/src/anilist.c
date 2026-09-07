@@ -55,6 +55,7 @@ static void cache_entry_free(gpointer p) {
     g_free(e->info.title);
     g_free(e->info.season);
     g_free(e->info.source);
+    g_free(e->info.start_date);
     g_free(e);
 }
 
@@ -79,6 +80,8 @@ static void cache_load(void) {
                 g_key_file_get_string(kf, groups[i], "season", NULL);
             e->info.source =
                 g_key_file_get_string(kf, groups[i], "source", NULL);
+            e->info.start_date =
+                g_key_file_get_string(kf, groups[i], "start-date", NULL);
             e->info.season_year = g_key_file_has_key(kf, groups[i],
                                                      "season-year", NULL)
                                       ? g_key_file_get_integer(
@@ -117,6 +120,8 @@ static void cache_save(void) {
             g_key_file_set_string(kf, key, "season", e->info.season);
         if (e->info.source)
             g_key_file_set_string(kf, key, "source", e->info.source);
+        if (e->info.start_date)
+            g_key_file_set_string(kf, key, "start-date", e->info.start_date);
         g_key_file_set_integer(kf, key, "season-year", e->info.season_year);
         g_key_file_set_int64(kf, key, "fetched", e->fetched);
     }
@@ -212,6 +217,7 @@ static void on_kitsu_done(GObject *src, GAsyncResult *res, gpointer data) {
                                                       "SUMMER", "FALL"};
                         e->info.season = g_strdup(names[(m - 1) / 3]);
                         e->info.season_year = y;
+                        e->info.start_date = g_strdup(start);
                     }
                 }
             }
@@ -307,6 +313,29 @@ static void on_curl_done(GObject *src, GAsyncResult *res, gpointer data) {
                     !json_object_get_null_member(media, "seasonYear"))
                     e->info.season_year =
                         json_object_get_int_member(media, "seasonYear");
+                if (json_object_has_member(media, "startDate") &&
+                    !json_object_get_null_member(media, "startDate")) {
+                    JsonObject *sd =
+                        json_object_get_object_member(media, "startDate");
+                    if (sd && json_object_has_member(sd, "year") &&
+                        !json_object_get_null_member(sd, "year")) {
+                        gint64 sy = json_object_get_int_member(sd, "year");
+                        gint64 sm =
+                            json_object_has_member(sd, "month") &&
+                                    !json_object_get_null_member(sd, "month")
+                                ? json_object_get_int_member(sd, "month")
+                                : 1;
+                        gint64 sday =
+                            json_object_has_member(sd, "day") &&
+                                    !json_object_get_null_member(sd, "day")
+                                ? json_object_get_int_member(sd, "day")
+                                : 1;
+                        e->info.start_date = g_strdup_printf(
+                            "%04" G_GINT64_FORMAT "-%02" G_GINT64_FORMAT
+                            "-%02" G_GINT64_FORMAT,
+                            sy, sm, sday);
+                    }
+                }
             }
         }
         g_object_unref(parser);
@@ -335,7 +364,8 @@ static gboolean process_queue(gpointer data) {
     json_builder_set_member_name(b, "query");
     json_builder_add_string_value(
         b, "query($s:String){Media(search:$s,type:ANIME){episodes status "
-           "season seasonYear title{romaji} nextAiringEpisode{episode}}}");
+           "season seasonYear startDate{year month day} title{romaji} "
+           "nextAiringEpisode{episode}}}");
     json_builder_set_member_name(b, "variables");
     json_builder_begin_object(b);
     json_builder_set_member_name(b, "s");

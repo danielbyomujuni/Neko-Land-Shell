@@ -490,14 +490,48 @@ typedef struct {
     int local;
 } CardAniReq;
 
+// Episodes actually available to own — unaired ones never count as
+// missing. Finished shows: the total. Airing shows: the provider's aired
+// count, else a weekly estimate from the premiere date (Kitsu has no aired
+// count), else -1 = unknowable, skip the comparison. partial is set when
+// the number is a to-date count rather than the series total.
+static int aired_expected(const AniInfo *info, gboolean *partial) {
+    *partial = FALSE;
+    if (!info->airing)
+        return info->episodes;
+    *partial = TRUE;
+    if (info->aired > 0)
+        return info->aired;
+    int y, m, d;
+    // estimate only when the total is known: long-running shows with an
+    // unknown episode count would produce huge bogus week counts
+    if (info->episodes > 0 && info->start_date &&
+        sscanf(info->start_date, "%d-%d-%d", &y, &m, &d) == 3) {
+        GDateTime *start = g_date_time_new_local(y, m, d, 0, 0, 0);
+        if (start) {
+            GDateTime *now = g_date_time_new_now_local();
+            int weeks = (int)(g_date_time_difference(now, start) /
+                              (G_TIME_SPAN_DAY * 7));
+            g_date_time_unref(start);
+            g_date_time_unref(now);
+            int est = weeks + 1; // weekly broadcast assumption
+            if (est < 0)
+                est = 0;
+            if (est > info->episodes)
+                est = info->episodes;
+            return est;
+        }
+    }
+    return -1;
+}
+
 static void card_ani_done(const AniInfo *info, gpointer data) {
     CardAniReq *req = data;
     CardAni *agg = req->agg;
 
     if (info && info->ok) {
-        int expected = (info->airing && info->aired > 0) ? info->aired
-                                                         : info->episodes;
-        gboolean partial = info->airing && info->aired > 0;
+        gboolean partial;
+        int expected = aired_expected(info, &partial);
         if (expected > 0 && req->local < expected) {
             agg->shortfall += expected - req->local;
             if (agg->tip->len)
@@ -704,11 +738,8 @@ static void page_ani_done(const AniInfo *info, gpointer data) {
         gtk_widget_set_visible(req->label, TRUE);
     }
     if (info && info->ok) {
-        // prefer episodes-aired-so-far for airing shows, but fall back to
-        // the total when the provider (e.g. Kitsu) doesn't report it
-        int expected = (info->airing && info->aired > 0) ? info->aired
-                                                         : info->episodes;
-        gboolean partial = info->airing && info->aired > 0;
+        gboolean partial;
+        int expected = aired_expected(info, &partial);
         if (expected > 0) {
             char *txt;
             const char *src = info->source ? info->source : "AniList";
@@ -717,6 +748,10 @@ static void page_ani_done(const AniInfo *info, gpointer data) {
                                       expected, partial ? " aired" : "", src,
                                       info->title ? info->title : "?");
                 gtk_widget_add_css_class(req->label, "missing-label");
+            } else if (partial) {
+                txt = g_strdup_printf("Up to date — %d aired so far (%s)",
+                                      expected, src);
+                gtk_widget_add_css_class(req->label, "dim-label");
             } else {
                 txt = g_strdup_printf("Complete — %d episode%s on %s",
                                       expected, expected == 1 ? "" : "s",
