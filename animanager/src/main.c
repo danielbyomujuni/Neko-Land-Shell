@@ -2,10 +2,16 @@
 // GTK4 + libadwaita, same conventions as settings/: GKeyFile config under
 // ~/.config/nekoland/, style.css loaded from beside the binary.
 
+#define _GNU_SOURCE // strverscmp
+#include <string.h>
+
 #include <adwaita.h>
 #include <gtk/gtk.h>
 
+#include "anilist.h"
+
 static GtkWindow *main_window;
+static GtkWidget *nav_view;        // library page + pushed series pages
 static GtkWidget *library_stack;   // "empty" page / "library" page
 static GtkWidget *library_box;     // vertical box holding per-folder sections
 
@@ -64,18 +70,148 @@ typedef struct {
     char *path;          // anime directory
     GtkWidget *picture;  // ref'd
     GtkWidget *subtitle; // ref'd
+    GtkWidget *badge;    // ref'd; missing-episode warning chip
     GdkPixbuf *pixbuf;   // result: scaled cover, or NULL
     int episodes;
-    int seasons; // video-bearing subdirectories (Season 1, ...)
+    int seasons;      // video-bearing subdirectories (Season 1, ...)
+    int missing_eps;  // holes in the episode runs
+    gboolean missing_season; // hole in the season numbering
+    char *missing_tip; // human-readable detail for the badge tooltip
+    GPtrArray *groups; // EpGroup* — one per episode-bearing directory
 } CardLoad;
+
+// one episode group (top level or a Season dir) for AniList comparison
+typedef struct {
+    char *search; // AniList search term
+    char *label;  // "Episodes" / "Season 2"
+    int count;    // local videos
+} EpGroup;
+
+static void ep_group_free(gpointer p) {
+    EpGroup *g = p;
+    g_free(g->search);
+    g_free(g->label);
+    g_free(g);
+}
 
 static void card_load_free(gpointer data) {
     CardLoad *cl = data;
     g_free(cl->path);
     g_object_unref(cl->picture);
     g_object_unref(cl->subtitle);
+    g_object_unref(cl->badge);
     g_clear_object(&cl->pixbuf);
+    g_free(cl->missing_tip);
+    g_clear_pointer(&cl->groups, g_ptr_array_unref);
     g_free(cl);
+}
+
+// compiled once before any card threads start (GRegex matching is
+// thread-safe, creation is not)
+static GRegex *re_ep_dash;   // " - 01", " - 01v2", " - 01.5"
+static GRegex *re_ep_word;   // "E01", "Ep 01", "Episode 01"
+static GRegex *re_ep_bare;   // fallback: standalone 1-4 digit number
+static GRegex *re_season;    // "Season 2", "S2"
+
+static void regexes_init(void) {
+    re_ep_dash = g_regex_new("\\s-\\s*([0-9]{1,4})(?:v[0-9]+|\\.[0-9]+)?\\b",
+                             0, 0, NULL);
+    re_ep_word = g_regex_new("\\b(?:e|ep|episode)\\.?\\s*([0-9]{1,4})\\b",
+                             G_REGEX_CASELESS, 0, NULL);
+    re_ep_bare = g_regex_new("\\b([0-9]{1,4})\\b", 0, 0, NULL);
+    re_season = g_regex_new("\\b(?:season|s)\\s*([0-9]{1,3})\\b",
+                            G_REGEX_CASELESS, 0, NULL);
+}
+
+// strip extension, "[...]" release tags and "(...)" quality tags so bare
+// numbers in them (crc32, 1080p) don't read as episode numbers
+static char *episode_stem(const char *fname) {
+    GString *s = g_string_new(NULL);
+    int depth = 0;
+    for (const char *p = fname; *p; p++) {
+        if (*p == '[' || *p == '(')
+            depth++;
+        else if (*p == ']' || *p == ')') {
+            if (depth > 0)
+                depth--;
+        } else if (depth == 0)
+            g_string_append_c(s, *p);
+    }
+    char *dot = strrchr(s->str, '.');
+    if (dot)
+        g_string_truncate(s, dot - s->str);
+    return g_string_free(s, FALSE);
+}
+
+static int match_int(GRegex *re, const char *str) {
+    GMatchInfo *mi = NULL;
+    int out = -1;
+    if (g_regex_match(re, str, 0, &mi)) {
+        char *num = g_match_info_fetch(mi, 1);
+        out = atoi(num);
+        g_free(num);
+    }
+    g_match_info_free(mi);
+    return out;
+}
+
+static int episode_number(const char *fname) {
+    char *stem = episode_stem(fname);
+    int n = match_int(re_ep_dash, stem);
+    if (n < 0)
+        n = match_int(re_ep_word, stem);
+    if (n < 0)
+        n = match_int(re_ep_bare, stem);
+    g_free(stem);
+    return n;
+}
+
+static int season_number(const char *dirname) {
+    return match_int(re_season, dirname);
+}
+
+// numbers absent between the smallest and largest present — holes in the
+// run, so a collection starting at a later cour isn't flagged
+static int int_cmp(gconstpointer a, gconstpointer b) {
+    return *(const int *)a - *(const int *)b;
+}
+
+static GArray *find_gaps(GArray *present) {
+    GArray *gaps = g_array_new(FALSE, FALSE, sizeof(int));
+    if (present->len < 2)
+        return gaps;
+    g_array_sort(present, int_cmp);
+    int lo = g_array_index(present, int, 0);
+    int hi = g_array_index(present, int, present->len - 1);
+    guint idx = 0;
+    for (int n = lo; n <= hi; n++) {
+        while (idx < present->len && g_array_index(present, int, idx) < n)
+            idx++;
+        if (idx >= present->len || g_array_index(present, int, idx) != n)
+            g_array_append_val(gaps, n);
+    }
+    return gaps;
+}
+
+// "6, 8–10"
+static char *format_ranges(GArray *nums) {
+    GString *s = g_string_new(NULL);
+    for (guint i = 0; i < nums->len;) {
+        guint j = i;
+        while (j + 1 < nums->len &&
+               g_array_index(nums, int, j + 1) ==
+                   g_array_index(nums, int, j) + 1)
+            j++;
+        if (s->len)
+            g_string_append(s, ", ");
+        if (j > i)
+            g_string_append_printf(s, "%d–%d", g_array_index(nums, int, i),
+                                   g_array_index(nums, int, j));
+        else
+            g_string_append_printf(s, "%d", g_array_index(nums, int, i));
+        i = j + 1;
+    }
+    return g_string_free(s, FALSE);
 }
 
 static gboolean is_video(const char *name) {
@@ -87,16 +223,41 @@ static gboolean is_video(const char *name) {
     return FALSE;
 }
 
-static int count_videos(const char *path) {
+// count the videos directly in path, collecting their parsed episode
+// numbers into nums (when given)
+static int count_videos(const char *path, GArray *nums) {
     int n = 0;
     GDir *dir = g_dir_open(path, 0, NULL);
     if (!dir)
         return 0;
     const char *name;
-    while ((name = g_dir_read_name(dir)))
-        if (is_video(name))
-            n++;
+    while ((name = g_dir_read_name(dir))) {
+        if (!is_video(name))
+            continue;
+        n++;
+        if (nums) {
+            int ep = episode_number(name);
+            if (ep >= 0)
+                g_array_append_val(nums, ep);
+        }
+    }
     g_dir_close(dir);
+    return n;
+}
+
+// gap-check one group of episode numbers; appends "Label missing: 6, 8-9"
+// to tip and returns how many are missing
+static int report_gaps(GArray *nums, const char *label, GString *tip) {
+    GArray *gaps = find_gaps(nums);
+    int n = gaps->len;
+    if (n > 0) {
+        char *ranges = format_ranges(gaps);
+        if (tip->len)
+            g_string_append_c(tip, '\n');
+        g_string_append_printf(tip, "%s missing: %s", label, ranges);
+        g_free(ranges);
+    }
+    g_array_unref(gaps);
     return n;
 }
 
@@ -116,7 +277,23 @@ static void card_load_thread(GTask *task, gpointer src, gpointer data,
         g_free(p);
     }
 
-    cl->episodes = count_videos(cl->path);
+    GString *tip = g_string_new(NULL);
+    GArray *top_nums = g_array_new(FALSE, FALSE, sizeof(int));
+    GArray *season_nums = g_array_new(FALSE, FALSE, sizeof(int));
+    char *series = g_path_get_basename(cl->path);
+    cl->groups = g_ptr_array_new_with_free_func(ep_group_free);
+
+    cl->episodes = count_videos(cl->path, top_nums);
+    cl->missing_eps += report_gaps(top_nums, "Episodes", tip);
+    if (cl->episodes > 0) {
+        EpGroup *g = g_new0(EpGroup, 1);
+        g->search = g_strdup(series);
+        g->label = g_strdup("Episodes");
+        g->count = cl->episodes;
+        g_ptr_array_add(cl->groups, g);
+    }
+    g_array_unref(top_nums);
+
     GDir *dir = g_dir_open(cl->path, 0, NULL);
     if (dir) {
         const char *name;
@@ -125,17 +302,89 @@ static void card_load_thread(GTask *task, gpointer src, gpointer data,
                 continue;
             char *sub = g_build_filename(cl->path, name, NULL);
             if (g_file_test(sub, G_FILE_TEST_IS_DIR)) {
-                int n = count_videos(sub);
+                GArray *nums = g_array_new(FALSE, FALSE, sizeof(int));
+                int n = count_videos(sub, nums);
                 if (n > 0) {
                     cl->seasons++;
                     cl->episodes += n;
+                    cl->missing_eps += report_gaps(nums, name, tip);
+                    int sn = season_number(name);
+                    if (sn >= 0)
+                        g_array_append_val(season_nums, sn);
+                    EpGroup *g = g_new0(EpGroup, 1);
+                    g->search = g_strdup_printf("%s %s", series, name);
+                    g->label = g_strdup(name);
+                    g->count = n;
+                    g_ptr_array_add(cl->groups, g);
                 }
+                g_array_unref(nums);
             }
             g_free(sub);
         }
         g_dir_close(dir);
     }
+    if (report_gaps(season_nums, "Seasons", tip) > 0)
+        cl->missing_season = TRUE;
+    g_array_unref(season_nums);
+    g_free(series);
+
+    if (tip->len)
+        cl->missing_tip = g_string_free(tip, FALSE);
+    else
+        g_string_free(tip, TRUE);
     g_task_return_boolean(task, TRUE);
+}
+
+// Per-card AniList aggregation: one lookup per episode group, badge
+// refreshed once every response is in.
+typedef struct {
+    GtkWidget *badge; // ref'd
+    int local_missing;
+    gboolean season_gap;
+    GString *tip;
+    int shortfall;
+    int pending;
+} CardAni;
+
+typedef struct {
+    CardAni *agg;
+    char *label;
+    int local;
+} CardAniReq;
+
+static void card_ani_done(const AniInfo *info, gpointer data) {
+    CardAniReq *req = data;
+    CardAni *agg = req->agg;
+
+    if (info && info->ok) {
+        int expected = info->airing ? info->aired : info->episodes;
+        if (expected > 0 && req->local < expected) {
+            agg->shortfall += expected - req->local;
+            if (agg->tip->len)
+                g_string_append_c(agg->tip, '\n');
+            g_string_append_printf(agg->tip, "%s: have %d of %d%s", req->label,
+                                   req->local, expected,
+                                   info->airing ? " aired" : "");
+        }
+    }
+
+    if (--agg->pending == 0) {
+        int total = agg->local_missing + agg->shortfall;
+        if (total > 0 || agg->season_gap) {
+            char *txt = total > 0 ? g_strdup_printf("%d missing", total)
+                                  : g_strdup("season gap");
+            gtk_label_set_text(GTK_LABEL(agg->badge), txt);
+            g_free(txt);
+            if (agg->tip->len)
+                gtk_widget_set_tooltip_text(agg->badge, agg->tip->str);
+            gtk_widget_set_visible(agg->badge, TRUE);
+        }
+        g_object_unref(agg->badge);
+        g_string_free(agg->tip, TRUE);
+        g_free(agg);
+    }
+    g_free(req->label);
+    g_free(req);
 }
 
 static void card_load_done(GObject *src, GAsyncResult *res, gpointer data) {
@@ -170,6 +419,349 @@ static void card_load_done(GObject *src, GAsyncResult *res, gpointer data) {
                               cl->episodes == 1 ? "" : "s");
     gtk_label_set_text(GTK_LABEL(cl->subtitle), sub);
     g_free(sub);
+
+    if (cl->missing_eps > 0 || cl->missing_season) {
+        char *txt;
+        if (cl->missing_eps > 0)
+            txt = g_strdup_printf("%d missing", cl->missing_eps);
+        else
+            txt = g_strdup("season gap");
+        gtk_label_set_text(GTK_LABEL(cl->badge), txt);
+        g_free(txt);
+        if (cl->missing_tip)
+            gtk_widget_set_tooltip_text(cl->badge, cl->missing_tip);
+        gtk_widget_set_visible(cl->badge, TRUE);
+    }
+
+    // compare each group against AniList; the badge upgrades as answers
+    // arrive (cached answers land immediately)
+    if (cl->groups && cl->groups->len > 0) {
+        CardAni *agg = g_new0(CardAni, 1);
+        agg->badge = g_object_ref(cl->badge);
+        agg->local_missing = cl->missing_eps;
+        agg->season_gap = cl->missing_season;
+        agg->tip = g_string_new(cl->missing_tip ? cl->missing_tip : "");
+        agg->pending = cl->groups->len;
+        for (guint i = 0; i < cl->groups->len; i++) {
+            EpGroup *g = cl->groups->pdata[i];
+            CardAniReq *req = g_new0(CardAniReq, 1);
+            req->agg = agg;
+            req->label = g_strdup(g->label);
+            req->local = g->count;
+            anilist_lookup(g->search, card_ani_done, req);
+        }
+    }
+}
+
+// ---------------------------------------------------------- series page --
+
+static int verscmp(gconstpointer a, gconstpointer b) {
+    return strverscmp(*(char *const *)a, *(char *const *)b);
+}
+
+// "[Erai-raws] Akane-banashi - 01 [1080p ...][...].mkv" -> "Episode 01",
+// falling back to the filename minus extension and release-group prefix
+static char *episode_title(const char *fname) {
+    char *base = g_strdup(fname);
+    char *dot = strrchr(base, '.');
+    if (dot)
+        *dot = '\0';
+
+    static GRegex *re;
+    if (!re)
+        re = g_regex_new("\\s-\\s*([0-9]+(?:\\.[0-9]+)?(?:v[0-9]+)?)\\b", 0,
+                         0, NULL);
+    GMatchInfo *mi = NULL;
+    char *out = NULL;
+    if (g_regex_match(re, base, 0, &mi)) {
+        char *num = g_match_info_fetch(mi, 1);
+        out = g_strdup_printf("Episode %s", num);
+        g_free(num);
+    }
+    g_match_info_free(mi);
+    if (!out) {
+        char *p = base;
+        if (*p == '[') {
+            char *end = strstr(p, "] ");
+            if (end)
+                p = end + 2;
+        }
+        out = g_strdup(p);
+    }
+    g_free(base);
+    return out;
+}
+
+static void on_episode_activated(AdwActionRow *row, gpointer data) {
+    (void)data;
+    const char *path = g_object_get_data(G_OBJECT(row), "episode-path");
+    GFile *file = g_file_new_for_path(path);
+    GtkFileLauncher *launcher = gtk_file_launcher_new(file);
+    gtk_file_launcher_launch(launcher, main_window, NULL, NULL, NULL);
+    g_object_unref(launcher);
+    g_object_unref(file);
+}
+
+typedef struct {
+    GtkWidget *label; // ref'd
+    int local;
+} PageAniReq;
+
+static void page_ani_done(const AniInfo *info, gpointer data) {
+    PageAniReq *req = data;
+    if (info && info->ok) {
+        int expected = info->airing ? info->aired : info->episodes;
+        if (expected > 0) {
+            char *txt;
+            if (req->local < expected) {
+                txt = g_strdup_printf("Have %d of %d%s — AniList: %s",
+                                      req->local, expected,
+                                      info->airing ? " aired" : "",
+                                      info->title ? info->title : "?");
+                gtk_widget_add_css_class(req->label, "missing-label");
+            } else {
+                txt = g_strdup_printf("Complete — %d episode%s on AniList",
+                                      expected, expected == 1 ? "" : "s");
+                gtk_widget_add_css_class(req->label, "dim-label");
+            }
+            gtk_label_set_text(GTK_LABEL(req->label), txt);
+            g_free(txt);
+            gtk_widget_set_visible(req->label, TRUE);
+        }
+    }
+    g_object_unref(req->label);
+    g_free(req);
+}
+
+// boxed list of the videos in one directory, under a heading; returns the
+// episode count (0 = nothing appended). search is the AniList term for
+// this group (NULL to skip the lookup).
+static int append_episode_group(GtkWidget *box, const char *title,
+                                const char *dir_path, const char *search) {
+    GPtrArray *files = g_ptr_array_new_with_free_func(g_free);
+    GDir *dir = g_dir_open(dir_path, 0, NULL);
+    if (dir) {
+        const char *name;
+        while ((name = g_dir_read_name(dir)))
+            if (is_video(name))
+                g_ptr_array_add(files, g_strdup(name));
+        g_dir_close(dir);
+    }
+    g_ptr_array_sort(files, verscmp);
+
+    int n = files->len;
+    if (n > 0) {
+        GtkWidget *heading = gtk_label_new(title);
+        gtk_label_set_xalign(GTK_LABEL(heading), 0.0);
+        gtk_widget_add_css_class(heading, "heading");
+        gtk_box_append(GTK_BOX(box), heading);
+
+        GArray *nums = g_array_new(FALSE, FALSE, sizeof(int));
+        for (guint i = 0; i < files->len; i++) {
+            int ep = episode_number(files->pdata[i]);
+            if (ep >= 0)
+                g_array_append_val(nums, ep);
+        }
+        GArray *gaps = find_gaps(nums);
+        if (gaps->len > 0) {
+            char *ranges = format_ranges(gaps);
+            char *txt = g_strdup_printf("Missing: %s", ranges);
+            GtkWidget *warn = gtk_label_new(txt);
+            g_free(txt);
+            g_free(ranges);
+            gtk_widget_add_css_class(warn, "missing-label");
+            gtk_label_set_xalign(GTK_LABEL(warn), 0.0);
+            gtk_label_set_wrap(GTK_LABEL(warn), TRUE);
+            gtk_box_append(GTK_BOX(box), warn);
+        }
+        g_array_unref(gaps);
+        g_array_unref(nums);
+
+        if (search) {
+            GtkWidget *ani = gtk_label_new("");
+            gtk_label_set_xalign(GTK_LABEL(ani), 0.0);
+            gtk_label_set_wrap(GTK_LABEL(ani), TRUE);
+            gtk_widget_add_css_class(ani, "anilist-label");
+            gtk_widget_set_visible(ani, FALSE);
+            gtk_box_append(GTK_BOX(box), ani);
+            PageAniReq *req = g_new0(PageAniReq, 1);
+            req->label = g_object_ref(ani);
+            req->local = n;
+            anilist_lookup(search, page_ani_done, req);
+        }
+
+        GtkWidget *list = gtk_list_box_new();
+        gtk_list_box_set_selection_mode(GTK_LIST_BOX(list),
+                                        GTK_SELECTION_NONE);
+        gtk_widget_add_css_class(list, "boxed-list");
+        for (guint i = 0; i < files->len; i++) {
+            GtkWidget *row = adw_action_row_new();
+            char *title_txt = episode_title(files->pdata[i]);
+            char *escaped = g_markup_escape_text(title_txt, -1);
+            adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), escaped);
+            g_free(escaped);
+            g_free(title_txt);
+            GtkWidget *play = gtk_image_new_from_icon_name(
+                "media-playback-start-symbolic");
+            adw_action_row_add_suffix(ADW_ACTION_ROW(row), play);
+            gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), TRUE);
+            adw_action_row_set_activatable_widget(ADW_ACTION_ROW(row), NULL);
+            g_object_set_data_full(
+                G_OBJECT(row), "episode-path",
+                g_build_filename(dir_path, files->pdata[i], NULL), g_free);
+            g_signal_connect(row, "activated",
+                             G_CALLBACK(on_episode_activated), NULL);
+            gtk_list_box_append(GTK_LIST_BOX(list), row);
+        }
+        gtk_box_append(GTK_BOX(box), list);
+    }
+    g_ptr_array_unref(files);
+    return n;
+}
+
+static void open_series(const char *path, const char *name,
+                        GdkPaintable *cover) {
+    GtkWidget *content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 18);
+    gtk_widget_set_margin_top(content, 24);
+    gtk_widget_set_margin_bottom(content, 24);
+    gtk_widget_set_margin_start(content, 18);
+    gtk_widget_set_margin_end(content, 18);
+
+    // header: poster + title + counts
+    GtkWidget *head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 20);
+    // fixed-size bin so the picture can never balloon to the texture's
+    // natural size (a size request is only a minimum)
+    GtkWidget *poster_bin = gtk_overlay_new();
+    gtk_widget_set_size_request(poster_bin, POSTER_W, POSTER_H);
+    gtk_widget_set_overflow(poster_bin, GTK_OVERFLOW_HIDDEN);
+    gtk_widget_add_css_class(poster_bin, "detail-poster");
+    gtk_widget_set_halign(poster_bin, GTK_ALIGN_START);
+    gtk_widget_set_valign(poster_bin, GTK_ALIGN_START);
+    // overlay children aren't measured, so the picture's natural (texture)
+    // size can't inflate the box beyond the fixed request
+    gtk_overlay_set_child(GTK_OVERLAY(poster_bin),
+                          gtk_box_new(GTK_ORIENTATION_VERTICAL, 0));
+    GtkWidget *poster = gtk_picture_new();
+    gtk_picture_set_content_fit(GTK_PICTURE(poster), GTK_CONTENT_FIT_COVER);
+    if (cover)
+        gtk_picture_set_paintable(GTK_PICTURE(poster), cover);
+    gtk_overlay_add_overlay(GTK_OVERLAY(poster_bin), poster);
+    gtk_box_append(GTK_BOX(head), poster_bin);
+
+    GtkWidget *meta = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_widget_set_valign(meta, GTK_ALIGN_END);
+    GtkWidget *title = gtk_label_new(name);
+    gtk_widget_add_css_class(title, "detail-title");
+    gtk_label_set_xalign(GTK_LABEL(title), 0.0);
+    gtk_label_set_wrap(GTK_LABEL(title), TRUE);
+    gtk_box_append(GTK_BOX(meta), title);
+    GtkWidget *counts = gtk_label_new("");
+    gtk_widget_add_css_class(counts, "dim-label");
+    gtk_label_set_xalign(GTK_LABEL(counts), 0.0);
+    gtk_box_append(GTK_BOX(meta), counts);
+    GtkWidget *where = gtk_label_new(path);
+    gtk_widget_add_css_class(where, "dim-label");
+    gtk_widget_add_css_class(where, "caption-label");
+    gtk_label_set_xalign(GTK_LABEL(where), 0.0);
+    gtk_label_set_ellipsize(GTK_LABEL(where), PANGO_ELLIPSIZE_MIDDLE);
+    gtk_box_append(GTK_BOX(meta), where);
+    gtk_box_append(GTK_BOX(head), meta);
+    gtk_box_append(GTK_BOX(content), head);
+
+    // episodes: top-level files, then each Season-style subdirectory
+    int episodes = 0, seasons = 0;
+    GPtrArray *subdirs = g_ptr_array_new_with_free_func(g_free);
+    GDir *dir = g_dir_open(path, 0, NULL);
+    if (dir) {
+        const char *entry;
+        while ((entry = g_dir_read_name(dir))) {
+            if (entry[0] == '.')
+                continue;
+            char *full = g_build_filename(path, entry, NULL);
+            if (g_file_test(full, G_FILE_TEST_IS_DIR))
+                g_ptr_array_add(subdirs, g_strdup(entry));
+            g_free(full);
+        }
+        g_dir_close(dir);
+    }
+    g_ptr_array_sort(subdirs, verscmp);
+
+    GArray *season_nums = g_array_new(FALSE, FALSE, sizeof(int));
+    episodes += append_episode_group(content, "Episodes", path, name);
+    for (guint i = 0; i < subdirs->len; i++) {
+        char *sub = g_build_filename(path, subdirs->pdata[i], NULL);
+        char *search = g_strdup_printf("%s %s", name,
+                                       (char *)subdirs->pdata[i]);
+        int n = append_episode_group(content, subdirs->pdata[i], sub, search);
+        g_free(search);
+        if (n > 0) {
+            seasons++;
+            episodes += n;
+            int sn = season_number(subdirs->pdata[i]);
+            if (sn >= 0)
+                g_array_append_val(season_nums, sn);
+        }
+        g_free(sub);
+    }
+    g_ptr_array_unref(subdirs);
+
+    GArray *season_gaps = find_gaps(season_nums);
+    if (season_gaps->len > 0) {
+        char *ranges = format_ranges(season_gaps);
+        char *txt = g_strdup_printf("Missing season%s: %s",
+                                    season_gaps->len == 1 ? "" : "s", ranges);
+        GtkWidget *warn = gtk_label_new(txt);
+        g_free(txt);
+        g_free(ranges);
+        gtk_widget_add_css_class(warn, "missing-label");
+        gtk_label_set_xalign(GTK_LABEL(warn), 0.0);
+        gtk_box_append(GTK_BOX(meta), warn);
+    }
+    g_array_unref(season_gaps);
+    g_array_unref(season_nums);
+
+    char *sub;
+    if (seasons > 1)
+        sub = g_strdup_printf("%d seasons · %d episodes", seasons, episodes);
+    else
+        sub = g_strdup_printf("%d episode%s", episodes,
+                              episodes == 1 ? "" : "s");
+    gtk_label_set_text(GTK_LABEL(counts), sub);
+    g_free(sub);
+
+    if (episodes == 0) {
+        GtkWidget *msg = gtk_label_new("No episodes found");
+        gtk_widget_add_css_class(msg, "dim-label");
+        gtk_label_set_xalign(GTK_LABEL(msg), 0.0);
+        gtk_box_append(GTK_BOX(content), msg);
+    }
+
+    GtkWidget *clamp = adw_clamp_new();
+    adw_clamp_set_maximum_size(ADW_CLAMP(clamp), 860);
+    adw_clamp_set_child(ADW_CLAMP(clamp), content);
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), clamp);
+
+    GtkWidget *view = adw_toolbar_view_new();
+    adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(view), adw_header_bar_new());
+    adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(view), scroll);
+
+    AdwNavigationPage *page = adw_navigation_page_new(view, name);
+    adw_navigation_view_push(ADW_NAVIGATION_VIEW(nav_view), page);
+}
+
+static void on_card_clicked(GtkGestureClick *gesture, int n_press, double x,
+                            double y, gpointer data) {
+    (void)n_press;
+    (void)x;
+    (void)y;
+    GtkWidget *card = data;
+    GtkWidget *pic = g_object_get_data(G_OBJECT(card), "cover-picture");
+    open_series(g_object_get_data(G_OBJECT(card), "series-path"),
+                g_object_get_data(G_OBJECT(card), "series-name"),
+                pic ? gtk_picture_get_paintable(GTK_PICTURE(pic)) : NULL);
+    gtk_gesture_set_state(GTK_GESTURE(gesture),
+                          GTK_EVENT_SEQUENCE_CLAIMED);
 }
 
 static GtkWidget *build_anime_card(const char *folder, const char *name) {
@@ -212,10 +804,32 @@ static GtkWidget *build_anime_card(const char *folder, const char *name) {
 
     gtk_overlay_add_overlay(GTK_OVERLAY(card), caption);
 
+    // warning chip in the poster's top-right corner, shown by the loader
+    // when the collection has holes
+    GtkWidget *badge = gtk_label_new("");
+    gtk_widget_add_css_class(badge, "missing-badge");
+    gtk_widget_set_halign(badge, GTK_ALIGN_END);
+    gtk_widget_set_valign(badge, GTK_ALIGN_START);
+    gtk_widget_set_margin_top(badge, 8);
+    gtk_widget_set_margin_end(badge, 8);
+    gtk_widget_set_visible(badge, FALSE);
+    gtk_overlay_add_overlay(GTK_OVERLAY(card), badge);
+
+    g_object_set_data_full(G_OBJECT(card), "series-path",
+                           g_build_filename(folder, name, NULL), g_free);
+    g_object_set_data_full(G_OBJECT(card), "series-name", g_strdup(name),
+                           g_free);
+    g_object_set_data(G_OBJECT(card), "cover-picture", pic);
+    gtk_widget_set_cursor_from_name(card, "pointer");
+    GtkGesture *click = gtk_gesture_click_new();
+    g_signal_connect(click, "released", G_CALLBACK(on_card_clicked), card);
+    gtk_widget_add_controller(card, GTK_EVENT_CONTROLLER(click));
+
     CardLoad *cl = g_new0(CardLoad, 1);
     cl->path = g_build_filename(folder, name, NULL);
     cl->picture = g_object_ref(pic);
     cl->subtitle = g_object_ref(subtitle);
+    cl->badge = g_object_ref(badge);
     GTask *task = g_task_new(NULL, NULL, card_load_done, NULL);
     g_task_set_task_data(task, cl, card_load_free);
     g_task_run_in_thread(task, card_load_thread);
@@ -484,6 +1098,8 @@ static void load_css(void) {
 static void activate(AdwApplication *app, gpointer data) {
     (void)data;
     load_css();
+    regexes_init();
+    anilist_init();
     config_load();
 
     GtkWidget *win = adw_application_window_new(GTK_APPLICATION(app));
@@ -533,7 +1149,11 @@ static void activate(AdwApplication *app, gpointer data) {
     dbg_scroll_attach(win, scroll);
 
     adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(view), library_stack);
-    adw_application_window_set_content(ADW_APPLICATION_WINDOW(win), view);
+
+    nav_view = adw_navigation_view_new();
+    adw_navigation_view_add(ADW_NAVIGATION_VIEW(nav_view),
+                            adw_navigation_page_new(view, "Animanager"));
+    adw_application_window_set_content(ADW_APPLICATION_WINDOW(win), nav_view);
 
     library_refresh();
     gtk_window_present(main_window);

@@ -64,3 +64,39 @@ floating-sheet > sheet headerbar {
   color: rgba(255, 255, 255, 0.70);
   font-size: 8pt;
 }
+
+/* warning chip on cards with holes in the collection */
+.missing-badge {
+  background: @warning_bg_color;
+  color: @warning_fg_color;
+  font-size: 8pt;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 99px;
+}
+
+/* "Missing: 6, 8–9" lines on the series page */
+.missing-label {
+  color: @warning_color;
+  font-size: 9pt;
+}
+
+/* "Have 6 of 8 — AniList: …" / "Complete — …" status lines */
+.anilist-label {
+  font-size: 9pt;
+}
+
+/* ---- series page ---- */
+
+.detail-poster {
+  background: @card_bg_color;
+  border: 1px solid @borders;
+  border-radius: 12px;
+}
+.detail-title {
+  font-size: 17pt;
+  font-weight: 800;
+}
+.caption-label {
+  font-size: 8pt;
+}
