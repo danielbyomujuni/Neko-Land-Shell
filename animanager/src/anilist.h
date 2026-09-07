@@ -8,6 +8,8 @@ typedef struct {
     int aired;      // episodes aired so far (airing shows), -1 if n/a
     gboolean airing;
     char *title;    // matched romaji title
+    char *season;   // "WINTER"/"SPRING"/"SUMMER"/"FALL", NULL if unknown
+    int season_year; // e.g. 2023, -1 if unknown
 } AniInfo;
 
 // Called on the main loop. info is owned by the cache — copy what you keep.

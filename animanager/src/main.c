@@ -4,6 +4,9 @@
 
 #define _GNU_SOURCE // strverscmp
 #include <string.h>
+#include <sys/stat.h>
+
+#include <glib/gstdio.h>
 
 #include <adwaita.h>
 #include <gtk/gtk.h>
@@ -13,7 +16,10 @@
 static GtkWindow *main_window;
 static GtkWidget *nav_view;        // library page + pushed series pages
 static GtkWidget *library_stack;   // "empty" page / "library" page
-static GtkWidget *library_box;     // vertical box holding per-folder sections
+static GtkWidget *library_box;     // vertical box holding season sections
+static GtkWidget *errors_box;      // folder-error notes above the sections
+static guint library_gen;          // bumped on refresh; stale async work
+                                   // checks it before touching the UI
 
 // settings dialog state (NULL while the dialog is closed)
 static AdwPreferencesGroup *folders_group;
@@ -68,10 +74,12 @@ static void config_save(void) {
 // thread because the library usually lives on a network mount.
 typedef struct {
     char *path;          // anime directory
+    GtkWidget *card;     // ref'd (sunk); placed into a season section
     GtkWidget *picture;  // ref'd
     GtkWidget *subtitle; // ref'd
     GtkWidget *badge;    // ref'd; missing-episode warning chip
     GdkPixbuf *pixbuf;   // result: scaled cover, or NULL
+    gint64 min_mtime;    // oldest episode file: season fallback
     int episodes;
     int seasons;      // video-bearing subdirectories (Season 1, ...)
     int missing_eps;  // holes in the episode runs
@@ -97,6 +105,7 @@ static void ep_group_free(gpointer p) {
 static void card_load_free(gpointer data) {
     CardLoad *cl = data;
     g_free(cl->path);
+    g_object_unref(cl->card);
     g_object_unref(cl->picture);
     g_object_unref(cl->subtitle);
     g_object_unref(cl->badge);
@@ -224,8 +233,8 @@ static gboolean is_video(const char *name) {
 }
 
 // count the videos directly in path, collecting their parsed episode
-// numbers into nums (when given)
-static int count_videos(const char *path, GArray *nums) {
+// numbers into nums and the oldest video mtime into min_mtime (when given)
+static int count_videos(const char *path, GArray *nums, gint64 *min_mtime) {
     int n = 0;
     GDir *dir = g_dir_open(path, 0, NULL);
     if (!dir)
@@ -239,6 +248,14 @@ static int count_videos(const char *path, GArray *nums) {
             int ep = episode_number(name);
             if (ep >= 0)
                 g_array_append_val(nums, ep);
+        }
+        if (min_mtime) {
+            char *full = g_build_filename(path, name, NULL);
+            GStatBuf st;
+            if (g_stat(full, &st) == 0 &&
+                (*min_mtime == 0 || st.st_mtime < *min_mtime))
+                *min_mtime = st.st_mtime;
+            g_free(full);
         }
     }
     g_dir_close(dir);
@@ -283,7 +300,7 @@ static void card_load_thread(GTask *task, gpointer src, gpointer data,
     char *series = g_path_get_basename(cl->path);
     cl->groups = g_ptr_array_new_with_free_func(ep_group_free);
 
-    cl->episodes = count_videos(cl->path, top_nums);
+    cl->episodes = count_videos(cl->path, top_nums, &cl->min_mtime);
     cl->missing_eps += report_gaps(top_nums, "Episodes", tip);
     if (cl->episodes > 0) {
         EpGroup *g = g_new0(EpGroup, 1);
@@ -303,7 +320,7 @@ static void card_load_thread(GTask *task, gpointer src, gpointer data,
             char *sub = g_build_filename(cl->path, name, NULL);
             if (g_file_test(sub, G_FILE_TEST_IS_DIR)) {
                 GArray *nums = g_array_new(FALSE, FALSE, sizeof(int));
-                int n = count_videos(sub, nums);
+                int n = count_videos(sub, nums, &cl->min_mtime);
                 if (n > 0) {
                     cl->seasons++;
                     cl->episodes += n;
@@ -333,6 +350,121 @@ static void card_load_thread(GTask *task, gpointer src, gpointer data,
     else
         g_string_free(tip, TRUE);
     g_task_return_boolean(task, TRUE);
+}
+
+// ------------------------------------------------------- season sections --
+
+static const char *SEASON_NAMES[] = {"Winter", "Spring", "Summer", "Fall"};
+
+typedef struct {
+    GtkWidget *box;  // heading + grid, child of library_box
+    GtkWidget *grid; // flowbox of cards
+    int score;       // year*4 + season index; -1 = unknown; sorted desc
+} SeasonSection;
+
+static GPtrArray *sections; // SeasonSection*, kept sorted by score desc
+
+static int flow_name_cmp(GtkFlowBoxChild *a, GtkFlowBoxChild *b,
+                         gpointer data) {
+    (void)data;
+    const char *na = g_object_get_data(
+        G_OBJECT(gtk_flow_box_child_get_child(a)), "series-name");
+    const char *nb = g_object_get_data(
+        G_OBJECT(gtk_flow_box_child_get_child(b)), "series-name");
+    return g_utf8_collate(na ? na : "", nb ? nb : "");
+}
+
+static SeasonSection *section_get(int score, const char *label) {
+    for (guint i = 0; i < sections->len; i++) {
+        SeasonSection *s = sections->pdata[i];
+        if (s->score == score)
+            return s;
+    }
+    SeasonSection *s = g_new0(SeasonSection, 1);
+    s->score = score;
+    s->box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 14);
+    GtkWidget *heading = gtk_label_new(label);
+    gtk_label_set_xalign(GTK_LABEL(heading), 0.0);
+    gtk_widget_add_css_class(heading, "season-heading");
+    gtk_box_append(GTK_BOX(s->box), heading);
+    s->grid = gtk_flow_box_new();
+    gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(s->grid),
+                                    GTK_SELECTION_NONE);
+    gtk_flow_box_set_homogeneous(GTK_FLOW_BOX(s->grid), TRUE);
+    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(s->grid), 16);
+    gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(s->grid), 16);
+    gtk_flow_box_set_min_children_per_line(GTK_FLOW_BOX(s->grid), 2);
+    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(s->grid), 30);
+    gtk_flow_box_set_sort_func(GTK_FLOW_BOX(s->grid), flow_name_cmp, NULL,
+                               NULL);
+    gtk_widget_set_halign(s->grid, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(s->box), s->grid);
+
+    // insert sorted: newest season first, unknown last
+    guint pos = sections->len;
+    for (guint i = 0; i < sections->len; i++)
+        if (((SeasonSection *)sections->pdata[i])->score < score) {
+            pos = i;
+            break;
+        }
+    g_ptr_array_insert(sections, pos, s);
+    gtk_box_append(GTK_BOX(library_box), s->box);
+    gtk_box_reorder_child_after(
+        GTK_BOX(library_box), s->box,
+        pos == 0 ? errors_box
+                 : ((SeasonSection *)sections->pdata[pos - 1])->box);
+    return s;
+}
+
+// move card into the section for score, creating/pruning sections as needed
+static void card_place(GtkWidget *card, int score, const char *label) {
+    SeasonSection *target = section_get(score, label);
+    GtkWidget *flow_child = gtk_widget_get_parent(card);
+    if (flow_child) {
+        GtkWidget *old_grid = gtk_widget_get_parent(flow_child);
+        if (old_grid == target->grid)
+            return;
+        g_object_ref(card);
+        gtk_flow_box_remove(GTK_FLOW_BOX(old_grid), flow_child);
+        gtk_flow_box_insert(GTK_FLOW_BOX(target->grid), card, -1);
+        g_object_unref(card);
+        for (guint i = 0; i < sections->len; i++) {
+            SeasonSection *s = sections->pdata[i];
+            if (s->grid == old_grid && !gtk_widget_get_first_child(old_grid)) {
+                gtk_box_remove(GTK_BOX(library_box), s->box);
+                g_ptr_array_remove_index(sections, i);
+                break;
+            }
+        }
+    } else {
+        gtk_flow_box_insert(GTK_FLOW_BOX(target->grid), card, -1);
+    }
+}
+
+static gboolean card_is_current(GtkWidget *card) {
+    return GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(card), "gen")) ==
+           library_gen;
+}
+
+// AniList knows the broadcast season; move the card there if the local
+// file-date guess was off
+static void card_season_done(const AniInfo *info, gpointer data) {
+    GtkWidget *card = data;
+    if (card_is_current(card) && info && info->ok && info->season &&
+        info->season_year > 0) {
+        int idx = 0;
+        if (!g_ascii_strcasecmp(info->season, "SPRING"))
+            idx = 1;
+        else if (!g_ascii_strcasecmp(info->season, "SUMMER"))
+            idx = 2;
+        else if (!g_ascii_strcasecmp(info->season, "FALL"))
+            idx = 3;
+        char *label =
+            g_strdup_printf("%s %d", SEASON_NAMES[idx], info->season_year);
+        card_place(card, info->season_year * 4 + idx, label);
+        g_free(label);
+    }
+    g_object_unref(card);
 }
 
 // Per-card AniList aggregation: one lookup per episode group, badge
@@ -391,6 +523,26 @@ static void card_load_done(GObject *src, GAsyncResult *res, gpointer data) {
     (void)src;
     (void)data;
     CardLoad *cl = g_task_get_task_data(G_TASK(res));
+    if (!card_is_current(cl->card))
+        return; // library was rebuilt while we were scanning
+
+    // place by oldest-file date (downloads track airing), then let the
+    // AniList answer correct it
+    int score = -1;
+    char *label = g_strdup("Unknown season");
+    if (cl->min_mtime > 0) {
+        GDateTime *dt = g_date_time_new_from_unix_local(cl->min_mtime);
+        int idx = (g_date_time_get_month(dt) - 1) / 3;
+        int year = g_date_time_get_year(dt);
+        score = year * 4 + idx;
+        g_free(label);
+        label = g_strdup_printf("%s %d", SEASON_NAMES[idx], year);
+        g_date_time_unref(dt);
+    }
+    card_place(cl->card, score, label);
+    g_free(label);
+    anilist_lookup(g_object_get_data(G_OBJECT(cl->card), "series-name"),
+                   card_season_done, g_object_ref(cl->card));
     if (cl->pixbuf) {
         // gdk_texture_new_for_pixbuf is deprecated; wrap the pixels directly
         GdkPixbuf *pb = cl->pixbuf;
@@ -820,6 +972,7 @@ static GtkWidget *build_anime_card(const char *folder, const char *name) {
     g_object_set_data_full(G_OBJECT(card), "series-name", g_strdup(name),
                            g_free);
     g_object_set_data(G_OBJECT(card), "cover-picture", pic);
+    g_object_set_data(G_OBJECT(card), "gen", GUINT_TO_POINTER(library_gen));
     gtk_widget_set_cursor_from_name(card, "pointer");
     GtkGesture *click = gtk_gesture_click_new();
     g_signal_connect(click, "released", G_CALLBACK(on_card_clicked), card);
@@ -827,6 +980,7 @@ static GtkWidget *build_anime_card(const char *folder, const char *name) {
 
     CardLoad *cl = g_new0(CardLoad, 1);
     cl->path = g_build_filename(folder, name, NULL);
+    cl->card = g_object_ref_sink(card); // parented later by card_place
     cl->picture = g_object_ref(pic);
     cl->subtitle = g_object_ref(subtitle);
     cl->badge = g_object_ref(badge);
@@ -842,76 +996,50 @@ static int name_collate(gconstpointer a, gconstpointer b) {
     return g_utf8_collate(*(char *const *)a, *(char *const *)b);
 }
 
-// Poster grid for one configured folder; the folder-path heading is only
-// shown when several folders are configured.
-static GtkWidget *build_folder_section(const char *folder,
-                                       gboolean show_heading) {
-    GtkWidget *section = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-
-    if (show_heading) {
-        GtkWidget *heading = gtk_label_new(folder);
-        gtk_label_set_xalign(GTK_LABEL(heading), 0.0);
-        gtk_widget_add_css_class(heading, "heading");
-        gtk_box_append(GTK_BOX(section), heading);
-    }
-
-    GPtrArray *names = g_ptr_array_new_with_free_func(g_free);
-    GDir *dir = g_dir_open(folder, 0, NULL);
-    if (dir) {
-        const char *name;
-        while ((name = g_dir_read_name(dir))) {
-            if (name[0] == '.')
-                continue;
-            char *full = g_build_filename(folder, name, NULL);
-            if (g_file_test(full, G_FILE_TEST_IS_DIR))
-                g_ptr_array_add(names, g_strdup(name));
-            g_free(full);
-        }
-        g_dir_close(dir);
-    }
-    g_ptr_array_sort(names, name_collate);
-
-    if (!dir || names->len == 0) {
-        GtkWidget *msg = gtk_label_new(!dir ? "Folder not accessible"
-                                            : "No anime in this folder");
-        gtk_label_set_xalign(GTK_LABEL(msg), 0.0);
-        gtk_widget_add_css_class(msg, "dim-label");
-        gtk_box_append(GTK_BOX(section), msg);
-        g_ptr_array_unref(names);
-        return section;
-    }
-
-    GtkWidget *grid = gtk_flow_box_new();
-    gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(grid), GTK_SELECTION_NONE);
-    gtk_flow_box_set_homogeneous(GTK_FLOW_BOX(grid), TRUE);
-    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(grid), 16);
-    gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(grid), 16);
-    gtk_flow_box_set_min_children_per_line(GTK_FLOW_BOX(grid), 2);
-    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(grid), 30);
-    gtk_widget_set_halign(grid, GTK_ALIGN_CENTER);
-    gtk_box_append(GTK_BOX(section), grid);
-
-    for (guint i = 0; i < names->len; i++)
-        gtk_flow_box_insert(GTK_FLOW_BOX(grid),
-                            build_anime_card(folder, names->pdata[i]), -1);
-    g_ptr_array_unref(names);
-    return section;
-}
-
-// Rebuild the main window content from the configured folders.
+// Rebuild the main window content: cards from every configured folder,
+// grouped into season sections as their background scans resolve.
 static void library_refresh(void) {
+    library_gen++;
+    g_clear_pointer(&sections, g_ptr_array_unref);
+    sections = g_ptr_array_new_with_free_func(g_free);
     GtkWidget *child;
     while ((child = gtk_widget_get_first_child(library_box)))
         gtk_box_remove(GTK_BOX(library_box), child);
+    errors_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_box_append(GTK_BOX(library_box), errors_box);
 
     if (folders->len == 0) {
         gtk_stack_set_visible_child_name(GTK_STACK(library_stack), "empty");
         return;
     }
-    for (guint i = 0; i < folders->len; i++)
-        gtk_box_append(GTK_BOX(library_box),
-                       build_folder_section(folders->pdata[i],
-                                            folders->len > 1));
+    for (guint i = 0; i < folders->len; i++) {
+        const char *folder = folders->pdata[i];
+        GPtrArray *names = g_ptr_array_new_with_free_func(g_free);
+        GDir *dir = g_dir_open(folder, 0, NULL);
+        if (dir) {
+            const char *name;
+            while ((name = g_dir_read_name(dir))) {
+                if (name[0] == '.')
+                    continue;
+                char *full = g_build_filename(folder, name, NULL);
+                if (g_file_test(full, G_FILE_TEST_IS_DIR))
+                    g_ptr_array_add(names, g_strdup(name));
+                g_free(full);
+            }
+            g_dir_close(dir);
+        } else {
+            char *txt = g_strdup_printf("Folder not accessible: %s", folder);
+            GtkWidget *msg = gtk_label_new(txt);
+            g_free(txt);
+            gtk_label_set_xalign(GTK_LABEL(msg), 0.0);
+            gtk_widget_add_css_class(msg, "dim-label");
+            gtk_box_append(GTK_BOX(errors_box), msg);
+        }
+        g_ptr_array_sort(names, name_collate);
+        for (guint j = 0; j < names->len; j++)
+            build_anime_card(folder, names->pdata[j]);
+        g_ptr_array_unref(names);
+    }
     gtk_stack_set_visible_child_name(GTK_STACK(library_stack), "library");
 }
 

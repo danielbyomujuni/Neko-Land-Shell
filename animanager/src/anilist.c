@@ -43,6 +43,7 @@ static char *cache_path(void) {
 static void cache_entry_free(gpointer p) {
     CacheEntry *e = p;
     g_free(e->info.title);
+    g_free(e->info.season);
     g_free(e);
 }
 
@@ -63,6 +64,14 @@ static void cache_load(void) {
                 g_key_file_get_boolean(kf, groups[i], "airing", NULL);
             e->info.title =
                 g_key_file_get_string(kf, groups[i], "title", NULL);
+            e->info.season =
+                g_key_file_get_string(kf, groups[i], "season", NULL);
+            e->info.season_year = g_key_file_has_key(kf, groups[i],
+                                                     "season-year", NULL)
+                                      ? g_key_file_get_integer(
+                                            kf, groups[i], "season-year",
+                                            NULL)
+                                      : -1;
             e->fetched =
                 g_key_file_get_int64(kf, groups[i], "fetched", NULL);
             g_hash_table_replace(cache, g_strdup(groups[i]), e);
@@ -91,6 +100,9 @@ static void cache_save(void) {
         g_key_file_set_boolean(kf, key, "airing", e->info.airing);
         if (e->info.title)
             g_key_file_set_string(kf, key, "title", e->info.title);
+        if (e->info.season)
+            g_key_file_set_string(kf, key, "season", e->info.season);
+        g_key_file_set_integer(kf, key, "season-year", e->info.season_year);
         g_key_file_set_int64(kf, key, "fetched", e->fetched);
     }
     g_key_file_save_to_file(kf, path, NULL);
@@ -123,6 +135,7 @@ static CacheEntry *store_miss(const char *key) {
     CacheEntry *e = g_new0(CacheEntry, 1);
     e->info.episodes = -1;
     e->info.aired = -1;
+    e->info.season_year = -1;
     e->fetched = g_get_real_time() / G_USEC_PER_SEC;
     g_hash_table_replace(cache, g_strdup(key), e);
     return e;
@@ -175,6 +188,14 @@ static void on_curl_done(GObject *src, GAsyncResult *res, gpointer data) {
                 if (title && json_object_has_member(title, "romaji"))
                     e->info.title = g_strdup(
                         json_object_get_string_member(title, "romaji"));
+                if (json_object_has_member(media, "season") &&
+                    !json_object_get_null_member(media, "season"))
+                    e->info.season = g_strdup(
+                        json_object_get_string_member(media, "season"));
+                if (json_object_has_member(media, "seasonYear") &&
+                    !json_object_get_null_member(media, "seasonYear"))
+                    e->info.season_year =
+                        json_object_get_int_member(media, "seasonYear");
             }
         }
         g_object_unref(parser);
@@ -201,7 +222,7 @@ static gboolean process_queue(gpointer data) {
     json_builder_set_member_name(b, "query");
     json_builder_add_string_value(
         b, "query($s:String){Media(search:$s,type:ANIME){episodes status "
-           "title{romaji} nextAiringEpisode{episode}}}");
+           "season seasonYear title{romaji} nextAiringEpisode{episode}}}");
     json_builder_set_member_name(b, "variables");
     json_builder_begin_object(b);
     json_builder_set_member_name(b, "s");

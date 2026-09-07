@@ -86,6 +86,13 @@ floating-sheet > sheet headerbar {
   font-size: 9pt;
 }
 
+/* season group headings in the library */
+.season-heading {
+  font-size: 13pt;
+  font-weight: 800;
+  margin-top: 6px;
+}
+
 /* ---- series page ---- */
 
 .detail-poster {
