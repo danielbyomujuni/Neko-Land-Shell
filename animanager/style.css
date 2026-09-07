@@ -26,3 +26,43 @@ floating-sheet > sheet headerbar {
   box-shadow: none;
   border-radius: 14px 14px 0 0;
 }
+
+/* ---- library poster grid ---- */
+
+.anime-card {
+  background: @card_bg_color;
+  border: 1px solid @borders;
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  transition: border-color 150ms ease, box-shadow 150ms ease,
+              filter 150ms ease;
+}
+.anime-card:hover {
+  border-color: @accent_color;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.55);
+  filter: brightness(1.08);
+}
+
+.poster-placeholder {
+  color: @insensitive_fg_color;
+}
+
+/* caption scrim over the poster's bottom edge; fixed dark gradient (not a
+   theme color) because it always sits on artwork */
+.anime-card .caption {
+  background: linear-gradient(to top,
+              rgba(0, 0, 0, 0.90) 0%,
+              rgba(0, 0, 0, 0.65) 55%,
+              rgba(0, 0, 0, 0.00) 100%);
+  padding: 26px 10px 9px 10px;
+}
+.anime-card .anime-title {
+  color: rgba(255, 255, 255, 0.96);
+  font-weight: 700;
+  font-size: 9.5pt;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+.anime-card .anime-sub {
+  color: rgba(255, 255, 255, 0.70);
+  font-size: 8pt;
+}

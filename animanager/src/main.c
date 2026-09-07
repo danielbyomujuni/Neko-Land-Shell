@@ -55,20 +55,191 @@ static void config_save(void) {
 
 // --------------------------------------------------------------- library --
 
-// One boxed list of the anime (subdirectories) inside a configured folder,
-// under a heading with the folder's path.
-static GtkWidget *build_folder_section(const char *folder) {
-    GtkWidget *section = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+#define POSTER_W 185
+#define POSTER_H 264 // ~2:3 like the jellyfin-style folder.jpg covers
 
-    GtkWidget *heading = gtk_label_new(folder);
-    gtk_label_set_xalign(GTK_LABEL(heading), 0.0);
-    gtk_widget_add_css_class(heading, "heading");
-    gtk_box_append(GTK_BOX(section), heading);
+// Per-card background load: cover art + episode/season counts, off the main
+// thread because the library usually lives on a network mount.
+typedef struct {
+    char *path;          // anime directory
+    GtkWidget *picture;  // ref'd
+    GtkWidget *subtitle; // ref'd
+    GdkPixbuf *pixbuf;   // result: scaled cover, or NULL
+    int episodes;
+    int seasons; // video-bearing subdirectories (Season 1, ...)
+} CardLoad;
 
-    GtkWidget *list = gtk_list_box_new();
-    gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_NONE);
-    gtk_widget_add_css_class(list, "boxed-list");
-    gtk_box_append(GTK_BOX(section), list);
+static void card_load_free(gpointer data) {
+    CardLoad *cl = data;
+    g_free(cl->path);
+    g_object_unref(cl->picture);
+    g_object_unref(cl->subtitle);
+    g_clear_object(&cl->pixbuf);
+    g_free(cl);
+}
+
+static gboolean is_video(const char *name) {
+    static const char *exts[] = {".mkv", ".mp4",  ".avi", ".webm",
+                                 ".mov", ".m2ts", ".ts",  NULL};
+    for (int i = 0; exts[i]; i++)
+        if (g_str_has_suffix(name, exts[i]))
+            return TRUE;
+    return FALSE;
+}
+
+static int count_videos(const char *path) {
+    int n = 0;
+    GDir *dir = g_dir_open(path, 0, NULL);
+    if (!dir)
+        return 0;
+    const char *name;
+    while ((name = g_dir_read_name(dir)))
+        if (is_video(name))
+            n++;
+    g_dir_close(dir);
+    return n;
+}
+
+static void card_load_thread(GTask *task, gpointer src, gpointer data,
+                             GCancellable *cancel) {
+    (void)src;
+    (void)cancel;
+    CardLoad *cl = data;
+
+    static const char *covers[] = {"folder.jpg", "folder.png", "cover.jpg",
+                                   "cover.png",  "poster.jpg", NULL};
+    for (int i = 0; covers[i] && !cl->pixbuf; i++) {
+        char *p = g_build_filename(cl->path, covers[i], NULL);
+        if (g_file_test(p, G_FILE_TEST_EXISTS))
+            cl->pixbuf = gdk_pixbuf_new_from_file_at_scale(p, POSTER_W * 2,
+                                                           -1, TRUE, NULL);
+        g_free(p);
+    }
+
+    cl->episodes = count_videos(cl->path);
+    GDir *dir = g_dir_open(cl->path, 0, NULL);
+    if (dir) {
+        const char *name;
+        while ((name = g_dir_read_name(dir))) {
+            if (name[0] == '.')
+                continue;
+            char *sub = g_build_filename(cl->path, name, NULL);
+            if (g_file_test(sub, G_FILE_TEST_IS_DIR)) {
+                int n = count_videos(sub);
+                if (n > 0) {
+                    cl->seasons++;
+                    cl->episodes += n;
+                }
+            }
+            g_free(sub);
+        }
+        g_dir_close(dir);
+    }
+    g_task_return_boolean(task, TRUE);
+}
+
+static void card_load_done(GObject *src, GAsyncResult *res, gpointer data) {
+    (void)src;
+    (void)data;
+    CardLoad *cl = g_task_get_task_data(G_TASK(res));
+    if (cl->pixbuf) {
+        // gdk_texture_new_for_pixbuf is deprecated; wrap the pixels directly
+        GdkPixbuf *pb = cl->pixbuf;
+        int h = gdk_pixbuf_get_height(pb);
+        gsize stride = gdk_pixbuf_get_rowstride(pb);
+        gsize size = stride * (h - 1) +
+                     (gsize)gdk_pixbuf_get_width(pb) *
+                         gdk_pixbuf_get_n_channels(pb);
+        GBytes *bytes = g_bytes_new(gdk_pixbuf_read_pixels(pb), size);
+        GdkTexture *tex = gdk_memory_texture_new(
+            gdk_pixbuf_get_width(pb), h,
+            gdk_pixbuf_get_has_alpha(pb) ? GDK_MEMORY_R8G8B8A8
+                                         : GDK_MEMORY_R8G8B8,
+            bytes, stride);
+        g_bytes_unref(bytes);
+        gtk_picture_set_paintable(GTK_PICTURE(cl->picture),
+                                  GDK_PAINTABLE(tex));
+        g_object_unref(tex);
+    }
+    char *sub;
+    if (cl->seasons > 1)
+        sub = g_strdup_printf("%d seasons · %d episodes", cl->seasons,
+                              cl->episodes);
+    else
+        sub = g_strdup_printf("%d episode%s", cl->episodes,
+                              cl->episodes == 1 ? "" : "s");
+    gtk_label_set_text(GTK_LABEL(cl->subtitle), sub);
+    g_free(sub);
+}
+
+static GtkWidget *build_anime_card(const char *folder, const char *name) {
+    // the whole card is the poster; title + counts sit on a gradient
+    // scrim over the artwork's bottom edge
+    GtkWidget *card = gtk_overlay_new();
+    gtk_widget_add_css_class(card, "anime-card");
+    gtk_widget_set_overflow(card, GTK_OVERFLOW_HIDDEN);
+    gtk_widget_set_size_request(card, POSTER_W, POSTER_H);
+
+    GtkWidget *ph = gtk_image_new_from_icon_name("folder-videos-symbolic");
+    gtk_image_set_pixel_size(GTK_IMAGE(ph), 48);
+    gtk_widget_add_css_class(ph, "poster-placeholder");
+    gtk_overlay_set_child(GTK_OVERLAY(card), ph);
+
+    GtkWidget *pic = gtk_picture_new();
+    gtk_picture_set_content_fit(GTK_PICTURE(pic), GTK_CONTENT_FIT_COVER);
+    gtk_overlay_add_overlay(GTK_OVERLAY(card), pic);
+
+    GtkWidget *caption = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_widget_add_css_class(caption, "caption");
+    gtk_widget_set_valign(caption, GTK_ALIGN_END);
+
+    GtkWidget *title = gtk_label_new(name);
+    gtk_widget_add_css_class(title, "anime-title");
+    gtk_label_set_xalign(GTK_LABEL(title), 0.0);
+    gtk_label_set_wrap(GTK_LABEL(title), TRUE);
+    gtk_label_set_ellipsize(GTK_LABEL(title), PANGO_ELLIPSIZE_END);
+    gtk_label_set_lines(GTK_LABEL(title), 2);
+    // natural width ~0 so the flowbox child stays poster-width
+    gtk_label_set_max_width_chars(GTK_LABEL(title), 1);
+    gtk_box_append(GTK_BOX(caption), title);
+
+    GtkWidget *subtitle = gtk_label_new("…");
+    gtk_widget_add_css_class(subtitle, "anime-sub");
+    gtk_label_set_xalign(GTK_LABEL(subtitle), 0.0);
+    gtk_label_set_ellipsize(GTK_LABEL(subtitle), PANGO_ELLIPSIZE_END);
+    gtk_label_set_max_width_chars(GTK_LABEL(subtitle), 1);
+    gtk_box_append(GTK_BOX(caption), subtitle);
+
+    gtk_overlay_add_overlay(GTK_OVERLAY(card), caption);
+
+    CardLoad *cl = g_new0(CardLoad, 1);
+    cl->path = g_build_filename(folder, name, NULL);
+    cl->picture = g_object_ref(pic);
+    cl->subtitle = g_object_ref(subtitle);
+    GTask *task = g_task_new(NULL, NULL, card_load_done, NULL);
+    g_task_set_task_data(task, cl, card_load_free);
+    g_task_run_in_thread(task, card_load_thread);
+    g_object_unref(task);
+
+    return card;
+}
+
+static int name_collate(gconstpointer a, gconstpointer b) {
+    return g_utf8_collate(*(char *const *)a, *(char *const *)b);
+}
+
+// Poster grid for one configured folder; the folder-path heading is only
+// shown when several folders are configured.
+static GtkWidget *build_folder_section(const char *folder,
+                                       gboolean show_heading) {
+    GtkWidget *section = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+
+    if (show_heading) {
+        GtkWidget *heading = gtk_label_new(folder);
+        gtk_label_set_xalign(GTK_LABEL(heading), 0.0);
+        gtk_widget_add_css_class(heading, "heading");
+        gtk_box_append(GTK_BOX(section), heading);
+    }
 
     GPtrArray *names = g_ptr_array_new_with_free_func(g_free);
     GDir *dir = g_dir_open(folder, 0, NULL);
@@ -84,28 +255,31 @@ static GtkWidget *build_folder_section(const char *folder) {
         }
         g_dir_close(dir);
     }
-    g_ptr_array_sort_values(names, (GCompareFunc)g_strcmp0);
+    g_ptr_array_sort(names, name_collate);
 
-    if (!dir) {
-        GtkWidget *row = adw_action_row_new();
-        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row),
-                                      "Folder not accessible");
-        gtk_widget_add_css_class(row, "dim-label");
-        gtk_list_box_append(GTK_LIST_BOX(list), row);
-    } else if (names->len == 0) {
-        GtkWidget *row = adw_action_row_new();
-        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row),
-                                      "No anime in this folder");
-        gtk_widget_add_css_class(row, "dim-label");
-        gtk_list_box_append(GTK_LIST_BOX(list), row);
+    if (!dir || names->len == 0) {
+        GtkWidget *msg = gtk_label_new(!dir ? "Folder not accessible"
+                                            : "No anime in this folder");
+        gtk_label_set_xalign(GTK_LABEL(msg), 0.0);
+        gtk_widget_add_css_class(msg, "dim-label");
+        gtk_box_append(GTK_BOX(section), msg);
+        g_ptr_array_unref(names);
+        return section;
     }
-    for (guint i = 0; i < names->len; i++) {
-        GtkWidget *row = adw_action_row_new();
-        char *escaped = g_markup_escape_text(names->pdata[i], -1);
-        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), escaped);
-        g_free(escaped);
-        gtk_list_box_append(GTK_LIST_BOX(list), row);
-    }
+
+    GtkWidget *grid = gtk_flow_box_new();
+    gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(grid), GTK_SELECTION_NONE);
+    gtk_flow_box_set_homogeneous(GTK_FLOW_BOX(grid), TRUE);
+    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(grid), 16);
+    gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(grid), 16);
+    gtk_flow_box_set_min_children_per_line(GTK_FLOW_BOX(grid), 2);
+    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(grid), 30);
+    gtk_widget_set_halign(grid, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(section), grid);
+
+    for (guint i = 0; i < names->len; i++)
+        gtk_flow_box_insert(GTK_FLOW_BOX(grid),
+                            build_anime_card(folder, names->pdata[i]), -1);
     g_ptr_array_unref(names);
     return section;
 }
@@ -122,7 +296,8 @@ static void library_refresh(void) {
     }
     for (guint i = 0; i < folders->len; i++)
         gtk_box_append(GTK_BOX(library_box),
-                       build_folder_section(folders->pdata[i]));
+                       build_folder_section(folders->pdata[i],
+                                            folders->len > 1));
     gtk_stack_set_visible_child_name(GTK_STACK(library_stack), "library");
 }
 
@@ -306,8 +481,10 @@ static void activate(AdwApplication *app, gpointer data) {
     library_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 24);
     gtk_widget_set_margin_top(library_box, 24);
     gtk_widget_set_margin_bottom(library_box, 24);
+    gtk_widget_set_margin_start(library_box, 18);
+    gtk_widget_set_margin_end(library_box, 18);
     GtkWidget *clamp = adw_clamp_new();
-    adw_clamp_set_maximum_size(ADW_CLAMP(clamp), 760);
+    adw_clamp_set_maximum_size(ADW_CLAMP(clamp), 1400);
     adw_clamp_set_child(ADW_CLAMP(clamp), library_box);
     GtkWidget *scroll = gtk_scrolled_window_new();
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), clamp);
