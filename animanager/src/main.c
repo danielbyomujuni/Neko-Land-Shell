@@ -12,6 +12,7 @@
 #include <gtk/gtk.h>
 
 #include "anilist.h"
+#include "fetch.h"
 
 static GtkWindow *main_window;
 static GtkWidget *nav_view;        // library page + pushed series pages
@@ -59,6 +60,8 @@ static void config_save(void) {
     g_free(dir);
 
     GKeyFile *kf = g_key_file_new();
+    // preserve sections owned elsewhere (e.g. [fetch] in fetch.c)
+    g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL);
     g_key_file_set_string_list(kf, "library", "folders",
                                (const char *const *)folders->pdata,
                                folders->len);
@@ -118,13 +121,14 @@ static void card_load_free(gpointer data) {
 }
 
 // compiled once before any card threads start (GRegex matching is
-// thread-safe, creation is not)
+// thread-safe, creation is not). Non-static: the fetch dialog test harness
+// reuses the same episode parsing.
 static GRegex *re_ep_dash;   // " - 01", " - 01v2", " - 01.5"
 static GRegex *re_ep_word;   // "E01", "Ep 01", "Episode 01"
 static GRegex *re_ep_bare;   // fallback: standalone 1-4 digit number
 static GRegex *re_season;    // "Season 2", "S2"
 
-static void regexes_init(void) {
+void regexes_init(void) {
     re_ep_dash = g_regex_new("\\s-\\s*([0-9]{1,4})(?:v[0-9]+|\\.[0-9]+)?\\b",
                              0, 0, NULL);
     re_ep_word = g_regex_new("\\b(?:e|ep|episode)\\.?\\s*([0-9]{1,4})\\b",
@@ -166,7 +170,7 @@ static int match_int(GRegex *re, const char *str) {
     return out;
 }
 
-static int episode_number(const char *fname) {
+int episode_number(const char *fname) {
     char *stem = episode_stem(fname);
     int n = match_int(re_ep_dash, stem);
     if (n < 0)
@@ -187,7 +191,7 @@ static int int_cmp(gconstpointer a, gconstpointer b) {
     return *(const int *)a - *(const int *)b;
 }
 
-static GArray *find_gaps(GArray *present) {
+GArray *find_gaps(GArray *present) {
     GArray *gaps = g_array_new(FALSE, FALSE, sizeof(int));
     if (present->len < 2)
         return gaps;
@@ -225,7 +229,7 @@ static char *format_ranges(GArray *nums) {
     return g_string_free(s, FALSE);
 }
 
-static gboolean is_video(const char *name) {
+gboolean is_video(const char *name) {
     static const char *exts[] = {".mkv", ".mp4",  ".avi", ".webm",
                                  ".mov", ".m2ts", ".ts",  NULL};
     for (int i = 0; exts[i]; i++)
@@ -659,16 +663,21 @@ static void on_episode_activated(AdwActionRow *row, gpointer data) {
 }
 
 // one episode group registered on a series page, for the manual refresh
+// (and the fetch-missing dialog, via dir)
 typedef struct {
     char *search;
     GtkWidget *label; // ref'd
     int local;
+    char *dir; // group directory: download destination for fetched episodes
+    char *title; // group heading ("Episodes" / "Season 2")
 } PageGroup;
 
 static void page_group_free(gpointer p) {
     PageGroup *g = p;
     g_free(g->search);
     g_object_unref(g->label);
+    g_free(g->dir);
+    g_free(g->title);
     g_free(g);
 }
 
@@ -751,6 +760,28 @@ static void on_page_refresh(GtkButton *btn, gpointer data) {
     }
 }
 
+static void on_fetch_closed(gpointer data) {
+    (void)data;
+    library_refresh(); // badges and season groups use fresh file state
+}
+
+static void on_fetch_clicked(GtkButton *btn, gpointer data) {
+    GPtrArray *groups = data;
+    const char *series = g_object_get_data(G_OBJECT(btn), "fetch-series");
+    if (!series || groups->len == 0)
+        return;
+    GPtrArray *fg = g_ptr_array_new_with_free_func(fetch_group_free);
+    for (guint i = 0; i < groups->len; i++) {
+        PageGroup *g = groups->pdata[i];
+        if (g->dir)
+            g_ptr_array_add(fg,
+                            fetch_group_new(g->search, g->title, g->dir));
+    }
+    if (fg->len > 0)
+        fetch_dialog_show(main_window, series, fg, on_fetch_closed, NULL);
+    g_ptr_array_unref(fg); // the dialog deep-copies what it needs
+}
+
 // boxed list of the videos in one directory, under a heading; returns the
 // episode count (0 = nothing appended). search is the AniList term for
 // this group (NULL to skip the lookup); the group is also registered in
@@ -813,6 +844,8 @@ static int append_episode_group(GtkWidget *box, const char *title,
                 g->search = g_strdup(search);
                 g->label = g_object_ref(ani);
                 g->local = n;
+                g->dir = g_strdup(dir_path);
+                g->title = g_strdup(title);
                 g_ptr_array_add(page_groups, g);
             }
         }
@@ -982,6 +1015,16 @@ static void open_series(const char *path, const char *name,
     g_signal_connect(refresh, "clicked", G_CALLBACK(on_page_refresh),
                      page_groups);
     adw_header_bar_pack_end(ADW_HEADER_BAR(header), refresh);
+    GtkWidget *fetch =
+        gtk_button_new_from_icon_name("folder-download-symbolic");
+    gtk_widget_set_tooltip_text(fetch,
+                                "Fetch missing episodes (SubsPlease / "
+                                "Erai-raws)");
+    g_object_set_data_full(G_OBJECT(fetch), "fetch-series", g_strdup(name),
+                           g_free);
+    g_signal_connect(fetch, "clicked", G_CALLBACK(on_fetch_clicked),
+                     page_groups);
+    adw_header_bar_pack_end(ADW_HEADER_BAR(header), fetch);
     adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(view), header);
     adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(view), scroll);
 
