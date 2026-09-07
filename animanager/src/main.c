@@ -423,6 +423,47 @@ static void open_settings(GtkButton *btn, gpointer data) {
 
 // ------------------------------------------------------------------- app --
 
+// dev hook: NEKOLAND_DEBUG_SCROLL=1 logs every scroll event reaching the
+// window plus the resulting adjustment moves, to diagnose dropped wheel
+// input
+static gboolean dbg_scroll(GtkEventControllerScroll *c, double dx, double dy,
+                           gpointer data) {
+    (void)data;
+    g_printerr("[scroll] dx=%+.3f dy=%+.3f unit=%s t=%u\n", dx, dy,
+               gtk_event_controller_scroll_get_unit(c) ==
+                       GDK_SCROLL_UNIT_WHEEL
+                   ? "wheel"
+                   : "surface",
+               gdk_event_get_time(gtk_event_controller_get_current_event(
+                   GTK_EVENT_CONTROLLER(c))));
+    return FALSE; // observe only
+}
+
+static void dbg_scroll_edge(GtkEventControllerScroll *c, gpointer data) {
+    g_printerr("[scroll] %s\n", (const char *)data);
+    (void)c;
+}
+
+static void dbg_adj_changed(GtkAdjustment *adj, gpointer data) {
+    (void)data;
+    g_printerr("[adj] value=%.1f\n", gtk_adjustment_get_value(adj));
+}
+
+static void dbg_scroll_attach(GtkWidget *win, GtkWidget *scroll) {
+    if (!g_getenv("NEKOLAND_DEBUG_SCROLL"))
+        return;
+    GtkEventController *c =
+        gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES);
+    gtk_event_controller_set_propagation_phase(c, GTK_PHASE_CAPTURE);
+    g_signal_connect(c, "scroll", G_CALLBACK(dbg_scroll), NULL);
+    g_signal_connect(c, "scroll-begin", G_CALLBACK(dbg_scroll_edge), "begin");
+    g_signal_connect(c, "scroll-end", G_CALLBACK(dbg_scroll_edge), "end");
+    gtk_widget_add_controller(win, c);
+    g_signal_connect(gtk_scrolled_window_get_vadjustment(
+                         GTK_SCROLLED_WINDOW(scroll)),
+                     "value-changed", G_CALLBACK(dbg_adj_changed), NULL);
+}
+
 static void load_css(void) {
     char *exe = g_file_read_link("/proc/self/exe", NULL);
     char *dir = g_path_get_dirname(exe ? exe : ".");
@@ -489,6 +530,7 @@ static void activate(AdwApplication *app, gpointer data) {
     GtkWidget *scroll = gtk_scrolled_window_new();
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), clamp);
     gtk_stack_add_named(GTK_STACK(library_stack), scroll, "library");
+    dbg_scroll_attach(win, scroll);
 
     adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(view), library_stack);
     adw_application_window_set_content(ADW_APPLICATION_WINDOW(win), view);
@@ -498,6 +540,9 @@ static void activate(AdwApplication *app, gpointer data) {
 }
 
 int main(int argc, char **argv) {
+    // GTK defaults to the Vulkan renderer, which stutters when scrolling
+    // on NVIDIA + Wayland; prefer GL (FALSE keeps any explicit override)
+    g_setenv("GSK_RENDERER", "gl", FALSE);
     AdwApplication *app = adw_application_new("org.nekoland.Animanager",
                                               G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(app, "activate", G_CALLBACK(activate), NULL);
