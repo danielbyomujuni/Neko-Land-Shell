@@ -10,9 +10,11 @@
 //     seeder counts.
 //
 // Downloads: the .torrent (when the backend provides one) is saved into the
-// episode's own folder, then the release is handed to a downloader — aria2c
-// straight into that folder when installed, otherwise the desktop's torrent
-// client via xdg-open. Install aria2c for fully automatic downloads.
+// episode's own folder, then the video itself is fetched with aria2c
+// straight into that folder. There is deliberately no "open in torrent
+// client" fallback: the installed clients (e.g. transmission-gtk) accept no
+// per-download destination, so they would silently land the video in
+// ~/Downloads instead of the series folder.
 
 #include "fetch.h"
 
@@ -510,15 +512,20 @@ void fetch_search(FetchProvider provider, const char *show, int episode,
 
 // ---------------------------------------------------------------- download --
 
+// Looked up fresh on every call: the user may install aria2c while the
+// dialog is open, and a stale negative would keep hiding auto-download.
 gboolean fetch_have_aria2(void) {
-    static int have = -1;
-    if (have < 0) {
-        char *p = g_find_program_in_path("aria2c");
-        have = p ? 1 : 0;
-        g_free(p);
-    }
-    return have == 1;
+    char *p = g_find_program_in_path("aria2c");
+    gboolean have = p != NULL;
+    g_free(p);
+    return have;
 }
+
+#define NEED_ARIA2_MSG                                                        \
+    "Install aria2c for automatic downloads: sudo pacman -S aria2"
+#define TORRENT_ONLY_MSG                                                      \
+    "Torrent saved in folder — install aria2c to fetch the video "           \
+    "automatically"
 
 typedef struct {
     FetchDlCallback cb;
@@ -526,6 +533,7 @@ typedef struct {
     FetchResult *res; // copy
     char *dest;
     char *torrent_file; // saved path, or NULL
+    gboolean use_aria2; // captured at start
 } DlCtx;
 
 static void dl_ctx_free(DlCtx *c) {
@@ -555,44 +563,31 @@ static void dl_finish(DlCtx *c, gboolean ok, const char *msg) {
     dl_ctx_free(c);
 }
 
-static void on_downloader_exit(GObject *src, GAsyncResult *res,
-                               gpointer data) {
+static void on_aria2_exit(GObject *src, GAsyncResult *res,
+                           gpointer data) {
     DlCtx *c = data;
-    if (fetch_have_aria2()) {
-        gboolean ok =
-            g_subprocess_wait_finish(G_SUBPROCESS(src), res, NULL);
-        dl_finish(c, ok, ok ? "Video downloaded to folder" : "aria2c failed");
-    } else {
-        // xdg-open exits right after dispatching; the client owns it now
-        dl_finish(c, TRUE, "Opened in torrent client");
-    }
+    gboolean ok = g_subprocess_wait_finish(G_SUBPROCESS(src), res, NULL);
+    dl_finish(c, ok, ok ? "Video downloaded to folder" : "aria2c failed");
 }
 
-static void spawn_downloader(DlCtx *c) {
+static void spawn_aria2(DlCtx *c) {
     const char *source = c->res->magnet ? c->res->magnet : c->torrent_file;
     if (!source) {
         dl_finish(c, FALSE, "No magnet or torrent");
         return;
     }
-    GSubprocess *proc = NULL;
-    if (fetch_have_aria2()) {
-        char *dir = g_strdup_printf("--dir=%s", c->dest);
-        proc = g_subprocess_new(
-            G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
-                G_SUBPROCESS_FLAGS_STDERR_SILENCE,
-            NULL, "aria2c", dir, "--seed-time=0", "--bt-enable-lpd=true",
-            source, NULL);
-        g_free(dir);
-    } else {
-        proc = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
-                                    G_SUBPROCESS_FLAGS_STDERR_SILENCE,
-                                NULL, "xdg-open", source, NULL);
-    }
+    char *dir = g_strdup_printf("--dir=%s", c->dest);
+    GSubprocess *proc = g_subprocess_new(
+        G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
+            G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+        NULL, "aria2c", dir, "--seed-time=0", "--bt-enable-lpd=true",
+        source, NULL);
+    g_free(dir);
     if (!proc) {
-        dl_finish(c, FALSE, "Could not launch downloader");
+        dl_finish(c, FALSE, "Could not launch aria2c");
         return;
     }
-    g_subprocess_wait_async(proc, NULL, on_downloader_exit, c);
+    g_subprocess_wait_async(proc, NULL, on_aria2_exit, c);
     g_object_unref(proc);
 }
 
@@ -601,14 +596,23 @@ static void on_torrent_saved(GObject *src, GAsyncResult *res,
     DlCtx *c = data;
     gboolean ok = g_subprocess_wait_finish(G_SUBPROCESS(src), res, NULL);
     if (!ok) {
-        // keep going when a magnet is available; otherwise this is fatal
+        // Without aria2c a failed .torrent save leaves nothing behind.
         g_clear_pointer(&c->torrent_file, g_free);
-        if (!c->res->magnet) {
-            dl_finish(c, FALSE, "Torrent download failed");
+        if (!c->use_aria2 || !c->res->magnet) {
+            dl_finish(c, FALSE,
+                      c->use_aria2 ? "Torrent download failed"
+                                   : NEED_ARIA2_MSG);
             return;
         }
     }
-    spawn_downloader(c);
+    if (c->use_aria2) {
+        spawn_aria2(c);
+    } else {
+        // No auto-downloader: the saved .torrent is all we can place
+        // correctly. Never xdg-open the magnet — the torrent client would
+        // download the video into its own folder, not this one.
+        dl_finish(c, TRUE, TORRENT_ONLY_MSG);
+    }
 }
 
 void fetch_download(const FetchResult *res, const char *dest_dir,
@@ -618,6 +622,13 @@ void fetch_download(const FetchResult *res, const char *dest_dir,
     c->data = user_data;
     c->res = result_copy(res);
     c->dest = g_strdup(dest_dir);
+    c->use_aria2 = fetch_have_aria2();
+    if (!c->use_aria2 && !res->torrent_url) {
+        // Magnet-only release (SubsPlease) with no tool that can fetch it
+        // into this folder: say so instead of mis-downloading elsewhere.
+        dl_finish(c, FALSE, NEED_ARIA2_MSG);
+        return;
+    }
     if (res->torrent_url && res->title) {
         char *fn = sanitize_filename(res->title);
         c->torrent_file = g_build_filename(dest_dir, fn, NULL);
@@ -633,8 +644,14 @@ void fetch_download(const FetchResult *res, const char *dest_dir,
             return;
         }
         g_clear_pointer(&c->torrent_file, g_free);
+        if (!c->use_aria2 || !c->res->magnet) {
+            dl_finish(c, FALSE,
+                      c->use_aria2 ? "Torrent download failed"
+                                   : NEED_ARIA2_MSG);
+            return;
+        }
     }
-    spawn_downloader(c);
+    spawn_aria2(c);
 }
 
 // ------------------------------------------------------------------ dialog --
@@ -758,6 +775,16 @@ static void update_summary(FetchDlg *dlg) {
         }
     }
     gtk_widget_set_sensitive(dlg->dl_all_btn, any_ready);
+
+    // re-evaluated (not cached): the user may install aria2c mid-dialog
+    gtk_label_set_text(
+        GTK_LABEL(dlg->hint),
+        fetch_have_aria2()
+            ? "Videos download straight into the episode folder (aria2c)."
+            : "Automatic video downloads need aria2c: sudo pacman -S aria2. "
+              "Until then, fetching only saves the .torrent into the "
+              "episode folder for manual adding — magnets would land in "
+              "your client's own folder, so they are not opened.");
 }
 
 static void miss_set_status(MissEp *m, const char *txt, gboolean spinning) {
@@ -936,7 +963,9 @@ static void start_download(MissEp *m) {
         return;
     m->busy = TRUE;
     if (!dlg->closed) {
-        miss_set_status(m, "Downloading…", TRUE);
+        miss_set_status(m, fetch_have_aria2() ? "Downloading…"
+                                              : "Saving torrent…",
+                        TRUE);
         gtk_widget_set_sensitive(m->dl_btn, FALSE);
         update_summary(dlg);
     }
@@ -1243,12 +1272,7 @@ AdwDialog *fetch_dialog_show(GtkWindow *parent, const char *series,
     gtk_box_append(GTK_BOX(controls), dlg->dl_all_btn);
     gtk_box_append(GTK_BOX(content), controls);
 
-    dlg->hint = gtk_label_new(
-        fetch_have_aria2()
-            ? "Videos download straight into the episode folder (aria2c)."
-            : "aria2c is not installed: releases open in your torrent "
-              "client instead. Install aria2c for fully automatic "
-              "downloads into the episode folder.");
+    dlg->hint = gtk_label_new(""); // text set by update_summary()
     gtk_label_set_wrap(GTK_LABEL(dlg->hint), TRUE);
     gtk_label_set_xalign(GTK_LABEL(dlg->hint), 0.0);
     gtk_widget_add_css_class(dlg->hint, "dim-label");
