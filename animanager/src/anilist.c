@@ -7,6 +7,7 @@
 #include "anilist.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 
 #include <gio/gio.h>
 #include <json-glib/json-glib.h>
@@ -56,7 +57,45 @@ static void cache_entry_free(gpointer p) {
     g_free(e->info.season);
     g_free(e->info.source);
     g_free(e->info.start_date);
+    g_free(e->info.description);
+    g_free(e->info.genres);
+    g_free(e->info.cover_url);
     g_free(e);
+}
+
+// AniList descriptions carry light HTML: <br> to newlines, drop other
+// tags, unescape the common entities
+static char *strip_html(const char *s) {
+    GString *out = g_string_new(NULL);
+    for (const char *p = s; *p;) {
+        if (*p == '<') {
+            if (g_ascii_strncasecmp(p, "<br", 3) == 0)
+                g_string_append_c(out, '\n');
+            const char *end = strchr(p, '>');
+            p = end ? end + 1 : p + strlen(p);
+        } else if (*p == '&') {
+            static const struct { const char *ent; char ch; } ents[] = {
+                {"&amp;", '&'},  {"&lt;", '<'},    {"&gt;", '>'},
+                {"&quot;", '"'}, {"&#039;", '\''}, {"&apos;", '\''},
+            };
+            gboolean hit = FALSE;
+            for (gsize i = 0; i < G_N_ELEMENTS(ents); i++)
+                if (g_str_has_prefix(p, ents[i].ent)) {
+                    g_string_append_c(out, ents[i].ch);
+                    p += strlen(ents[i].ent);
+                    hit = TRUE;
+                    break;
+                }
+            if (!hit) {
+                g_string_append_c(out, '&');
+                p++;
+            }
+        } else {
+            g_string_append_c(out, *p);
+            p++;
+        }
+    }
+    return g_string_free(out, FALSE);
 }
 
 static void cache_load(void) {
@@ -82,6 +121,16 @@ static void cache_load(void) {
                 g_key_file_get_string(kf, groups[i], "source", NULL);
             e->info.start_date =
                 g_key_file_get_string(kf, groups[i], "start-date", NULL);
+            e->info.description =
+                g_key_file_get_string(kf, groups[i], "description", NULL);
+            e->info.genres =
+                g_key_file_get_string(kf, groups[i], "genres", NULL);
+            e->info.score = g_key_file_has_key(kf, groups[i], "score", NULL)
+                                ? g_key_file_get_integer(kf, groups[i],
+                                                         "score", NULL)
+                                : -1;
+            e->info.cover_url =
+                g_key_file_get_string(kf, groups[i], "cover", NULL);
             e->info.season_year = g_key_file_has_key(kf, groups[i],
                                                      "season-year", NULL)
                                       ? g_key_file_get_integer(
@@ -122,6 +171,14 @@ static void cache_save(void) {
             g_key_file_set_string(kf, key, "source", e->info.source);
         if (e->info.start_date)
             g_key_file_set_string(kf, key, "start-date", e->info.start_date);
+        if (e->info.description)
+            g_key_file_set_string(kf, key, "description",
+                                  e->info.description);
+        if (e->info.genres)
+            g_key_file_set_string(kf, key, "genres", e->info.genres);
+        g_key_file_set_integer(kf, key, "score", e->info.score);
+        if (e->info.cover_url)
+            g_key_file_set_string(kf, key, "cover", e->info.cover_url);
         g_key_file_set_integer(kf, key, "season-year", e->info.season_year);
         g_key_file_set_int64(kf, key, "fetched", e->fetched);
     }
@@ -156,6 +213,7 @@ static CacheEntry *store_miss(const char *key) {
     e->info.episodes = -1;
     e->info.aired = -1;
     e->info.season_year = -1;
+    e->info.score = -1;
     e->fetched = g_get_real_time() / G_USEC_PER_SEC;
     g_hash_table_replace(cache, g_strdup(key), e);
     return e;
@@ -202,6 +260,33 @@ static void on_kitsu_done(GObject *src, GAsyncResult *res, gpointer data) {
                         e->info.title =
                             g_strdup(json_object_get_string_member(
                                 attr, "canonicalTitle"));
+                    if (json_object_has_member(attr, "synopsis") &&
+                        !json_object_get_null_member(attr, "synopsis"))
+                        e->info.description = g_strdup(
+                            json_object_get_string_member(attr, "synopsis"));
+                    if (json_object_has_member(attr, "averageRating") &&
+                        !json_object_get_null_member(attr, "averageRating"))
+                        e->info.score =
+                            atoi(json_object_get_string_member(
+                                attr, "averageRating"));
+                    if (json_object_has_member(attr, "posterImage") &&
+                        !json_object_get_null_member(attr, "posterImage")) {
+                        JsonObject *pi = json_object_get_object_member(
+                            attr, "posterImage");
+                        const char *u =
+                            pi && json_object_has_member(pi, "medium") &&
+                                    !json_object_get_null_member(pi,
+                                                                 "medium")
+                                ? json_object_get_string_member(pi, "medium")
+                                : NULL;
+                        if (!u && pi &&
+                            json_object_has_member(pi, "original") &&
+                            !json_object_get_null_member(pi, "original"))
+                            u = json_object_get_string_member(pi,
+                                                              "original");
+                        if (u)
+                            e->info.cover_url = g_strdup(u);
+                    }
                     // season/year from the premiere date
                     const char *start =
                         json_object_has_member(attr, "startDate") &&
@@ -313,6 +398,46 @@ static void on_curl_done(GObject *src, GAsyncResult *res, gpointer data) {
                     !json_object_get_null_member(media, "seasonYear"))
                     e->info.season_year =
                         json_object_get_int_member(media, "seasonYear");
+                const char *desc = NULL;
+                if (json_object_has_member(media, "description") &&
+                    !json_object_get_null_member(media, "description"))
+                    desc =
+                        json_object_get_string_member(media, "description");
+                if (desc)
+                    e->info.description = strip_html(desc);
+                if (json_object_has_member(media, "genres") &&
+                    !json_object_get_null_member(media, "genres")) {
+                    JsonArray *ga =
+                        json_object_get_array_member(media, "genres");
+                    GString *gs = g_string_new(NULL);
+                    for (guint gi = 0;
+                         gi < MIN(json_array_get_length(ga), 4); gi++) {
+                        if (gs->len)
+                            g_string_append(gs, ", ");
+                        g_string_append(
+                            gs, json_array_get_string_element(ga, gi));
+                    }
+                    if (gs->len)
+                        e->info.genres = g_string_free(gs, FALSE);
+                    else
+                        g_string_free(gs, TRUE);
+                }
+                if (json_object_has_member(media, "averageScore") &&
+                    !json_object_get_null_member(media, "averageScore"))
+                    e->info.score =
+                        json_object_get_int_member(media, "averageScore");
+                if (json_object_has_member(media, "coverImage") &&
+                    !json_object_get_null_member(media, "coverImage")) {
+                    JsonObject *ci =
+                        json_object_get_object_member(media, "coverImage");
+                    const char *large =
+                        ci && json_object_has_member(ci, "large") &&
+                                !json_object_get_null_member(ci, "large")
+                            ? json_object_get_string_member(ci, "large")
+                            : NULL;
+                    if (large)
+                        e->info.cover_url = g_strdup(large);
+                }
                 if (json_object_has_member(media, "startDate") &&
                     !json_object_get_null_member(media, "startDate")) {
                     JsonObject *sd =
@@ -365,7 +490,8 @@ static gboolean process_queue(gpointer data) {
     json_builder_add_string_value(
         b, "query($s:String){Media(search:$s,type:ANIME){episodes status "
            "season seasonYear startDate{year month day} title{romaji} "
-           "nextAiringEpisode{episode}}}");
+           "nextAiringEpisode{episode} description genres averageScore "
+           "coverImage{large}}}");
     json_builder_set_member_name(b, "variables");
     json_builder_begin_object(b);
     json_builder_set_member_name(b, "s");

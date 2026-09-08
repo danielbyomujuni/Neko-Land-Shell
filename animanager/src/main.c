@@ -13,12 +13,14 @@
 
 #include "anilist.h"
 #include "fetch.h"
+#include "schedule.h"
 
 static GtkWindow *main_window;
 static GtkWidget *nav_view;        // library page + pushed series pages
 static GtkWidget *library_stack;   // "empty" page / "library" page
 static GtkWidget *library_box;     // vertical box holding season sections
 static GtkWidget *errors_box;      // folder-error notes above the sections
+static GtkWidget *releases_box;    // "new episodes" strip above the grid
 static guint library_gen;          // bumped on refresh; stale async work
                                    // checks it before touching the UI
 
@@ -417,7 +419,7 @@ static SeasonSection *section_get(int score, const char *label) {
     gtk_box_append(GTK_BOX(library_box), s->box);
     gtk_box_reorder_child_after(
         GTK_BOX(library_box), s->box,
-        pos == 0 ? errors_box
+        pos == 0 ? releases_box
                  : ((SeasonSection *)sections->pdata[pos - 1])->box);
     return s;
 }
@@ -454,8 +456,75 @@ static gboolean card_is_current(GtkWidget *card) {
 
 // AniList knows the broadcast season; move the card there if the local
 // file-date guess was off
+// ------------------------------------------------------- provider covers --
+
+// download a provider poster into ~/.cache/nekoland/covers/ (keyed by URL
+// hash) and put it on picture; served from disk on later runs
+typedef struct {
+    char *path;
+    GtkWidget *picture; // ref'd
+} CoverJob;
+
+static void cover_apply(GtkWidget *picture, const char *path) {
+    GdkTexture *tex = gdk_texture_new_from_filename(path, NULL);
+    if (tex) {
+        gtk_picture_set_paintable(GTK_PICTURE(picture),
+                                  GDK_PAINTABLE(tex));
+        g_object_unref(tex);
+    }
+}
+
+static void cover_curl_done(GObject *src, GAsyncResult *res, gpointer data) {
+    CoverJob *job = data;
+    g_subprocess_wait_finish(G_SUBPROCESS(src), res, NULL);
+    GStatBuf st;
+    if (g_stat(job->path, &st) == 0 && st.st_size > 0)
+        cover_apply(job->picture, job->path);
+    else
+        g_remove(job->path);
+    g_free(job->path);
+    g_object_unref(job->picture);
+    g_free(job);
+}
+
+static void cover_fetch(const char *url, GtkWidget *picture) {
+    if (!url || !*url)
+        return;
+    char *dir = g_build_filename(g_get_user_cache_dir(), "nekoland",
+                                 "covers", NULL);
+    g_mkdir_with_parents(dir, 0755);
+    char *hash = g_compute_checksum_for_string(G_CHECKSUM_MD5, url, -1);
+    char *path = g_build_filename(dir, hash, NULL);
+    g_free(hash);
+    g_free(dir);
+
+    if (g_file_test(path, G_FILE_TEST_EXISTS)) {
+        cover_apply(picture, path);
+        g_free(path);
+        return;
+    }
+    GSubprocess *proc = g_subprocess_new(
+        G_SUBPROCESS_FLAGS_STDERR_SILENCE, NULL, "curl", "-s", "--globoff",
+        "-m", "20", "-o", path, url, NULL);
+    if (!proc) {
+        g_free(path);
+        return;
+    }
+    CoverJob *job = g_new0(CoverJob, 1);
+    job->path = path;
+    job->picture = g_object_ref(picture);
+    g_subprocess_wait_async(proc, NULL, cover_curl_done, job);
+    g_object_unref(proc);
+}
+
 static void card_season_done(const AniInfo *info, gpointer data) {
     GtkWidget *card = data;
+    if (card_is_current(card) && info && info->ok && info->cover_url) {
+        // no folder.jpg on disk: fall back to the provider's poster
+        GtkWidget *pic = g_object_get_data(G_OBJECT(card), "cover-picture");
+        if (pic && !gtk_picture_get_paintable(GTK_PICTURE(pic)))
+            cover_fetch(info->cover_url, pic);
+    }
     if (card_is_current(card) && info && info->ok && info->season &&
         info->season_year > 0) {
         int idx = 0;
@@ -927,6 +996,46 @@ static int append_episode_group(GtkWidget *box, const char *title,
     return n;
 }
 
+// fills the series-page header (score/genres line, synopsis, and a poster
+// when there's no local cover) once the provider answers
+typedef struct {
+    GtkWidget *facts;    // ref'd; "★ 8.2 · Comedy, Romance"
+    GtkWidget *synopsis; // ref'd
+    GtkWidget *poster;   // ref'd
+    gboolean need_cover;
+} EnrichReq;
+
+static void page_enrich_done(const AniInfo *info, gpointer data) {
+    EnrichReq *req = data;
+    if (info && info->ok) {
+        GString *facts = g_string_new(NULL);
+        if (info->score > 0)
+            g_string_append_printf(facts, "\342\230\205 %.1f",
+                                   info->score / 10.0);
+        if (info->genres) {
+            if (facts->len)
+                g_string_append(facts, " \302\267 ");
+            g_string_append(facts, info->genres);
+        }
+        if (facts->len) {
+            gtk_label_set_text(GTK_LABEL(req->facts), facts->str);
+            gtk_widget_set_visible(req->facts, TRUE);
+        }
+        g_string_free(facts, TRUE);
+
+        if (info->description && *info->description) {
+            gtk_label_set_text(GTK_LABEL(req->synopsis), info->description);
+            gtk_widget_set_visible(req->synopsis, TRUE);
+        }
+        if (req->need_cover && info->cover_url)
+            cover_fetch(info->cover_url, req->poster);
+    }
+    g_object_unref(req->facts);
+    g_object_unref(req->synopsis);
+    g_object_unref(req->poster);
+    g_free(req);
+}
+
 static void open_series(const char *path, const char *name,
                         GdkPaintable *cover) {
     GtkWidget *content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 18);
@@ -967,6 +1076,12 @@ static void open_series(const char *path, const char *name,
     gtk_widget_add_css_class(counts, "dim-label");
     gtk_label_set_xalign(GTK_LABEL(counts), 0.0);
     gtk_box_append(GTK_BOX(meta), counts);
+    GtkWidget *facts = gtk_label_new("");
+    gtk_widget_add_css_class(facts, "dim-label");
+    gtk_label_set_xalign(GTK_LABEL(facts), 0.0);
+    gtk_label_set_ellipsize(GTK_LABEL(facts), PANGO_ELLIPSIZE_END);
+    gtk_widget_set_visible(facts, FALSE);
+    gtk_box_append(GTK_BOX(meta), facts);
     GtkWidget *where = gtk_label_new(path);
     gtk_widget_add_css_class(where, "dim-label");
     gtk_widget_add_css_class(where, "caption-label");
@@ -975,6 +1090,23 @@ static void open_series(const char *path, const char *name,
     gtk_box_append(GTK_BOX(meta), where);
     gtk_box_append(GTK_BOX(head), meta);
     gtk_box_append(GTK_BOX(content), head);
+
+    GtkWidget *synopsis = gtk_label_new("");
+    gtk_widget_add_css_class(synopsis, "synopsis");
+    gtk_label_set_xalign(GTK_LABEL(synopsis), 0.0);
+    gtk_label_set_wrap(GTK_LABEL(synopsis), TRUE);
+    gtk_label_set_ellipsize(GTK_LABEL(synopsis), PANGO_ELLIPSIZE_END);
+    gtk_label_set_lines(GTK_LABEL(synopsis), 8);
+    gtk_label_set_max_width_chars(GTK_LABEL(synopsis), 40);
+    gtk_widget_set_visible(synopsis, FALSE);
+    gtk_box_append(GTK_BOX(content), synopsis);
+
+    EnrichReq *ereq = g_new0(EnrichReq, 1);
+    ereq->facts = g_object_ref(facts);
+    ereq->synopsis = g_object_ref(synopsis);
+    ereq->poster = g_object_ref(poster);
+    ereq->need_cover = cover == NULL;
+    anilist_lookup(name, page_enrich_done, ereq);
 
     // episodes: top-level files, then each Season-style subdirectory
     int episodes = 0, seasons = 0;
@@ -1179,6 +1311,261 @@ static int name_collate(gconstpointer a, gconstpointer b) {
 
 // Rebuild the main window content: cards from every configured folder,
 // grouped into season sections as their background scans resolve.
+// ---------------------------------------------------------- release strip --
+
+// lowercase alphanumerics only, so "Akane-banashi" == "Akanebanashi"
+static char *normalize_title(const char *s) {
+    GString *out = g_string_new(NULL);
+    char *low = g_utf8_casefold(s, -1);
+    for (const char *p = low; *p; p = g_utf8_next_char(p)) {
+        gunichar c = g_utf8_get_char(p);
+        if (g_unichar_isalnum(c))
+            g_string_append_unichar(out, c);
+    }
+    g_free(low);
+    return g_string_free(out, FALSE);
+}
+
+static gboolean title_matches(const char *norm_series, const char *cand) {
+    if (!cand || !*cand)
+        return FALSE;
+    char *n = normalize_title(cand);
+    gboolean ok = FALSE;
+    if (*n) {
+        if (strcmp(norm_series, n) == 0)
+            ok = TRUE;
+        else if (strlen(n) >= 8 && strstr(norm_series, n))
+            ok = TRUE;
+        else if (strlen(norm_series) >= 8 && strstr(n, norm_series))
+            ok = TRUE;
+    }
+    g_free(n);
+    return ok;
+}
+
+// highest parsed episode number anywhere under path (one recursion level
+// per subdirectory chain — Season dirs)
+static int scan_max_episode(const char *path) {
+    int max = -1;
+    GDir *dir = g_dir_open(path, 0, NULL);
+    if (!dir)
+        return -1;
+    const char *name;
+    while ((name = g_dir_read_name(dir))) {
+        if (name[0] == '.')
+            continue;
+        char *full = g_build_filename(path, name, NULL);
+        if (g_file_test(full, G_FILE_TEST_IS_DIR)) {
+            int m = scan_max_episode(full);
+            if (m > max)
+                max = m;
+        } else if (is_video(name)) {
+            int ep = episode_number(name);
+            if (ep > max)
+                max = ep;
+        }
+        g_free(full);
+    }
+    g_dir_close(dir);
+    return max;
+}
+
+// background have-this-episode check that styles the chip when done
+typedef struct {
+    char *path;
+    int episode;
+    GtkWidget *chip; // ref'd
+    gboolean have;
+} ChipCheck;
+
+static void chip_check_free(gpointer p) {
+    ChipCheck *cc = p;
+    g_free(cc->path);
+    g_object_unref(cc->chip);
+    g_free(cc);
+}
+
+static void chip_check_thread(GTask *task, gpointer src, gpointer data,
+                              GCancellable *cancel) {
+    (void)src;
+    (void)cancel;
+    ChipCheck *cc = data;
+    cc->have = scan_max_episode(cc->path) >= cc->episode;
+    g_task_return_boolean(task, TRUE);
+}
+
+static void chip_check_done(GObject *src, GAsyncResult *res, gpointer data) {
+    (void)src;
+    (void)data;
+    ChipCheck *cc = g_task_get_task_data(G_TASK(res));
+    gtk_widget_add_css_class(cc->chip,
+                             cc->have ? "release-have" : "release-new");
+    gtk_widget_set_tooltip_text(cc->chip, cc->have
+                                              ? "Already in the library"
+                                              : "Not in the library yet");
+}
+
+static void on_chip_clicked(GtkButton *btn, gpointer data) {
+    (void)data;
+    open_series(g_object_get_data(G_OBJECT(btn), "series-path"),
+                g_object_get_data(G_OBJECT(btn), "series-name"), NULL);
+}
+
+static char *rel_time(GDateTime *dt, GDateTime *now) {
+    GTimeSpan d = g_date_time_difference(now, dt);
+    if (d < 0)
+        return g_strdup("airing now");
+    int h = (int)(d / G_TIME_SPAN_HOUR);
+    if (h < 1)
+        return g_strdup("just now");
+    if (h < 24)
+        return g_strdup_printf("%dh ago", h);
+    int days = h / 24;
+    return days == 1 ? g_strdup("yesterday")
+                     : g_strdup_printf("%dd ago", days);
+}
+
+typedef struct {
+    ScheduleEntry *entry; // borrowed from the schedule cache
+    char *folder;
+    char *name; // matched library series
+} ReleaseHit;
+
+static int hit_date_cmp(gconstpointer a, gconstpointer b) {
+    const ReleaseHit *ha = *(ReleaseHit *const *)a;
+    const ReleaseHit *hb = *(ReleaseHit *const *)b;
+    return g_date_time_compare(hb->entry->date, ha->entry->date);
+}
+
+static void releases_update(GPtrArray *entries, gpointer data) {
+    if (GPOINTER_TO_UINT(data) != library_gen || !releases_box)
+        return;
+    GtkWidget *child;
+    while ((child = gtk_widget_get_first_child(releases_box)))
+        gtk_box_remove(GTK_BOX(releases_box), child);
+    if (!entries)
+        return; // no token / fetch failed: strip stays empty
+
+    // index of library series: normalized name -> folder+name
+    GPtrArray *lib = g_ptr_array_new();
+    for (guint i = 0; i < folders->len; i++) {
+        GDir *dir = g_dir_open(folders->pdata[i], 0, NULL);
+        if (!dir)
+            continue;
+        const char *name;
+        while ((name = g_dir_read_name(dir))) {
+            if (name[0] == '.')
+                continue;
+            char *full = g_build_filename(folders->pdata[i], name, NULL);
+            if (g_file_test(full, G_FILE_TEST_IS_DIR)) {
+                ReleaseHit *s = g_new0(ReleaseHit, 1);
+                s->folder = full;
+                s->name = g_strdup(name);
+                g_ptr_array_add(lib, s);
+                continue;
+            }
+            g_free(full);
+        }
+        g_dir_close(dir);
+    }
+
+    GDateTime *now = g_date_time_new_now_utc();
+    GPtrArray *hits = g_ptr_array_new_with_free_func(g_free);
+    for (guint i = 0; i < entries->len; i++) {
+        ScheduleEntry *e = entries->pdata[i];
+        if (!e->date || g_date_time_compare(e->date, now) > 0)
+            continue; // not aired yet
+        if (e->airing_status &&
+            g_strcmp0(e->airing_status, "delayed-air") == 0)
+            continue;
+        for (guint j = 0; j < lib->len; j++) {
+            ReleaseHit *s = lib->pdata[j];
+            char *norm = normalize_title(s->name);
+            gboolean m = title_matches(norm, e->title) ||
+                         title_matches(norm, e->romaji) ||
+                         title_matches(norm, e->english);
+            g_free(norm);
+            if (m) {
+                ReleaseHit *h = g_new0(ReleaseHit, 1);
+                h->entry = e;
+                h->folder = g_strdup(s->folder);
+                h->name = g_strdup(s->name);
+                g_ptr_array_add(hits, h);
+                break;
+            }
+        }
+    }
+    g_ptr_array_sort(hits, hit_date_cmp);
+
+    if (hits->len > 0) {
+        GtkWidget *heading = gtk_label_new("New episodes");
+        gtk_label_set_xalign(GTK_LABEL(heading), 0.0);
+        gtk_widget_add_css_class(heading, "season-heading");
+        gtk_box_append(GTK_BOX(releases_box), heading);
+
+        GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+        for (guint i = 0; i < hits->len; i++) {
+            ReleaseHit *h = hits->pdata[i];
+            GtkWidget *chip = gtk_button_new();
+            gtk_widget_add_css_class(chip, "release-chip");
+            GtkWidget *v = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+            GtkWidget *t = gtk_label_new(h->name);
+            gtk_label_set_xalign(GTK_LABEL(t), 0.0);
+            gtk_label_set_ellipsize(GTK_LABEL(t), PANGO_ELLIPSIZE_END);
+            gtk_label_set_max_width_chars(GTK_LABEL(t), 24);
+            gtk_widget_add_css_class(t, "release-title");
+            gtk_box_append(GTK_BOX(v), t);
+            char *when = rel_time(h->entry->date, now);
+            char *sub =
+                h->entry->episode > 0
+                    ? g_strdup_printf("Ep %d · %s", h->entry->episode, when)
+                    : g_strdup(when);
+            GtkWidget *s = gtk_label_new(sub);
+            gtk_label_set_xalign(GTK_LABEL(s), 0.0);
+            gtk_widget_add_css_class(s, "release-sub");
+            gtk_box_append(GTK_BOX(v), s);
+            g_free(sub);
+            g_free(when);
+            gtk_button_set_child(GTK_BUTTON(chip), v);
+
+            g_object_set_data_full(G_OBJECT(chip), "series-path",
+                                   g_strdup(h->folder), g_free);
+            g_object_set_data_full(G_OBJECT(chip), "series-name",
+                                   g_strdup(h->name), g_free);
+            g_signal_connect(chip, "clicked", G_CALLBACK(on_chip_clicked),
+                             NULL);
+            gtk_box_append(GTK_BOX(row), chip);
+
+            if (h->entry->episode > 0) {
+                ChipCheck *cc = g_new0(ChipCheck, 1);
+                cc->path = g_strdup(h->folder);
+                cc->episode = h->entry->episode;
+                cc->chip = g_object_ref(chip);
+                GTask *task = g_task_new(NULL, NULL, chip_check_done, NULL);
+                g_task_set_task_data(task, cc, chip_check_free);
+                g_task_run_in_thread(task, chip_check_thread);
+                g_object_unref(task);
+            }
+        }
+        GtkWidget *hscroll = gtk_scrolled_window_new();
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(hscroll),
+                                       GTK_POLICY_AUTOMATIC,
+                                       GTK_POLICY_NEVER);
+        gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(hscroll), row);
+        gtk_box_append(GTK_BOX(releases_box), hscroll);
+    }
+
+    g_date_time_unref(now);
+    g_ptr_array_unref(hits);
+    for (guint j = 0; j < lib->len; j++) {
+        ReleaseHit *s = lib->pdata[j];
+        g_free(s->folder);
+        g_free(s->name);
+        g_free(s);
+    }
+    g_ptr_array_unref(lib);
+}
+
 static void library_refresh(void) {
     library_gen++;
     g_clear_pointer(&sections, g_ptr_array_unref);
@@ -1188,6 +1575,9 @@ static void library_refresh(void) {
         gtk_box_remove(GTK_BOX(library_box), child);
     errors_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_box_append(GTK_BOX(library_box), errors_box);
+    releases_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    gtk_box_append(GTK_BOX(library_box), releases_box);
+    schedule_fetch(releases_update, GUINT_TO_POINTER(library_gen));
 
     if (folders->len == 0) {
         gtk_stack_set_visible_child_name(GTK_STACK(library_stack), "empty");
@@ -1315,6 +1705,12 @@ static void on_settings_closed(AdwDialog *dlg, gpointer data) {
     g_clear_pointer(&folder_rows, g_ptr_array_unref);
 }
 
+static void on_token_apply(AdwEntryRow *row, gpointer data) {
+    (void)data;
+    schedule_set_token(gtk_editable_get_text(GTK_EDITABLE(row)));
+    library_refresh(); // rebuilds the release strip with the new token
+}
+
 static void open_settings(GtkButton *btn, gpointer data) {
     (void)btn;
     (void)data;
@@ -1338,7 +1734,24 @@ static void open_settings(GtkButton *btn, gpointer data) {
     folder_rows = g_ptr_array_new();
     settings_rows_refresh();
 
+    AdwPreferencesGroup *sched_group =
+        ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+    adw_preferences_group_set_title(sched_group, "New releases");
+    adw_preferences_group_set_description(
+        sched_group,
+        "Weekly airing strip via animeschedule.net. Create a free account, "
+        "then an app token under Account Settings \342\206\222 API.");
+    GtkWidget *token_row = adw_entry_row_new();
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(token_row),
+                                  "AnimeSchedule API token");
+    adw_entry_row_set_show_apply_button(ADW_ENTRY_ROW(token_row), TRUE);
+    if (schedule_token())
+        gtk_editable_set_text(GTK_EDITABLE(token_row), schedule_token());
+    g_signal_connect(token_row, "apply", G_CALLBACK(on_token_apply), NULL);
+    adw_preferences_group_add(sched_group, token_row);
+
     adw_preferences_page_add(page, folders_group);
+    adw_preferences_page_add(page, sched_group);
     adw_preferences_dialog_add(ADW_PREFERENCES_DIALOG(dlg), page);
     g_signal_connect(dlg, "closed", G_CALLBACK(on_settings_closed), NULL);
     adw_dialog_present(dlg, GTK_WIDGET(main_window));
@@ -1409,6 +1822,7 @@ static void activate(AdwApplication *app, gpointer data) {
     load_css();
     regexes_init();
     anilist_init();
+    schedule_init();
     config_load();
 
     GtkWidget *win = adw_application_window_new(GTK_APPLICATION(app));

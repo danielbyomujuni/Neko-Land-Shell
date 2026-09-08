@@ -93,6 +93,30 @@ floating-sheet > sheet headerbar {
   margin-top: 6px;
 }
 
+/* ---- new-episodes release strip ---- */
+
+.release-chip {
+  background: @card_bg_color;
+  border: 1px solid @borders;
+  border-radius: 10px;
+  padding: 8px 12px;
+  box-shadow: none;
+}
+.release-chip.release-new {
+  border-color: @accent_color;
+}
+.release-chip.release-have {
+  opacity: 0.55;
+}
+.release-title {
+  font-weight: 600;
+  font-size: 9pt;
+}
+.release-sub {
+  font-size: 8pt;
+  color: alpha(currentColor, 0.7);
+}
+
 /* ---- series page ---- */
 
 .detail-poster {
@@ -106,4 +130,8 @@ floating-sheet > sheet headerbar {
 }
 .caption-label {
   font-size: 8pt;
+}
+.synopsis {
+  font-size: 9.5pt;
+  color: alpha(currentColor, 0.85);
 }

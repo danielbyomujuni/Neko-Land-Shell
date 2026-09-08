@@ -34,6 +34,13 @@ typedef void (*FetchCallback)(GPtrArray *results, gpointer user_data);
 void fetch_search(FetchProvider provider, const char *show, int episode,
                   const char *quality, FetchCallback cb, gpointer user_data);
 
+// Highest single-episode number the provider lists for show (0 = none
+// found / lookup failed). Used to enumerate aired-but-missing tails when
+// AniList/Kitsu has no usable episode count. Batches are ignored.
+typedef void (*FetchLatestCb)(int latest, gpointer user_data);
+void fetch_latest(FetchProvider provider, const char *show,
+                  FetchLatestCb cb, gpointer user_data);
+
 // Save the .torrent (when known) into dest_dir, then fetch the video with
 // aria2c straight into dest_dir. Without aria2c only the .torrent can be
 // placed (magnet-only releases fail with an install hint).

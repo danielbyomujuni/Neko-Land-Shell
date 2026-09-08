@@ -3,7 +3,7 @@ CFLAGS ?= -O2 -Wall -Wextra
 CFLAGS += $(shell pkg-config --cflags $(PKGS))
 LDLIBS = $(shell pkg-config --libs $(PKGS))
 
-SRC = src/main.c src/anilist.c src/fetch.c
+SRC = src/main.c src/anilist.c src/fetch.c src/schedule.c
 OBJ = $(SRC:.c=.o)
 
 all: nekoland-animanager

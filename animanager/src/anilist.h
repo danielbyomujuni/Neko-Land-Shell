@@ -12,6 +12,10 @@ typedef struct {
     int season_year; // e.g. 2023, -1 if unknown
     char *source;   // "AniList" or "Kitsu" (fallback provider)
     char *start_date; // premiere "YYYY-MM-DD", NULL if unknown
+    char *description; // plain-text synopsis, NULL if unknown
+    char *genres;      // "Comedy, Romance" (AniList only), NULL if unknown
+    int score;         // average score 0-100, -1 if unknown
+    char *cover_url;   // poster image URL, NULL if unknown
 } AniInfo;
 
 // Called on the main loop. info is owned by the cache — copy what you keep.

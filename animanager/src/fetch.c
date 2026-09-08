@@ -143,6 +143,9 @@ typedef struct {
     int episode;
     char *quality;
     int page;
+    gboolean latest; // max-episode mode: cb unused, latest_cb gets best
+    int best;
+    FetchLatestCb latest_cb;
 } SpSearch;
 
 static void sp_search_free(SpSearch *s) {
@@ -153,12 +156,19 @@ static void sp_search_free(SpSearch *s) {
 
 // The API's episode field is a plain number for single episodes ("7",
 // "1175"); batches look like "01-13" and must not match a single fetch.
-static gboolean sp_episode_match(const char *epstr, int wanted) {
+// Returns the plain number, or -1 for batches and junk.
+static int sp_episode_int(const char *epstr) {
     if (!epstr || !*epstr)
-        return FALSE;
+        return -1;
     char *end = NULL;
     long v = strtol(epstr, &end, 10);
-    return end != epstr && *end == '\0' && v == wanted;
+    if (end == epstr || *end != '\0' || v <= 0 || v > 9999)
+        return -1;
+    return (int)v;
+}
+
+static gboolean sp_episode_match(const char *epstr, int wanted) {
+    return sp_episode_int(epstr) == wanted;
 }
 
 // size display from the magnet's xl=<bytes> parameter
@@ -191,6 +201,23 @@ static void on_sp_page(GObject *src, GAsyncResult *res, gpointer data) {
                     ? json_node_get_object(root)
                     : NULL;
             if (obj) {
+                if (s->latest) {
+                    // newest page first, but scan everything for the max
+                    GList *members = json_object_get_members(obj);
+                    for (GList *l = members; l; l = l->next) {
+                        JsonObject *e = json_object_get_object_member(
+                            obj, l->data);
+                        const char *ep =
+                            e && json_object_has_member(e, "episode")
+                                ? json_object_get_string_member(e,
+                                                                "episode")
+                                : NULL;
+                        int v = sp_episode_int(ep);
+                        if (v > s->best)
+                            s->best = v;
+                    }
+                    g_list_free(members);
+                } else {
                 GList *members = json_object_get_members(obj);
                 for (GList *l = members; l && !found; l = l->next) {
                     const char *key = l->data;
@@ -244,13 +271,20 @@ static void on_sp_page(GObject *src, GAsyncResult *res, gpointer data) {
                     found->seeders = -1;
                 }
                 g_list_free(members);
+                } // else (!latest): single-episode scan above
             }
         }
         g_object_unref(parser);
     }
     g_free(out);
 
-    if (found || s->page + 1 >= MAX_SP_PAGES) {
+    if (s->latest) {
+        if (s->page + 1 >= MAX_SP_PAGES) {
+            s->latest_cb(s->best, s->data);
+            sp_search_free(s);
+            return;
+        }
+    } else if (found || s->page + 1 >= MAX_SP_PAGES) {
         GPtrArray *arr = g_ptr_array_new_with_free_func(fetch_result_free);
         if (found)
             g_ptr_array_add(arr, found);
@@ -275,6 +309,9 @@ static void sp_fetch_page(SpSearch *s) {
     if (proc) {
         g_subprocess_communicate_utf8_async(proc, NULL, NULL, on_sp_page, s);
         g_object_unref(proc);
+    } else if (s->latest) {
+        s->latest_cb(s->best, s->data);
+        sp_search_free(s);
     } else {
         reply_empty(s->cb, s->data);
         sp_search_free(s);
@@ -292,6 +329,9 @@ typedef struct {
     int episode;
     char *quality; // "480" / "720" / "1080"
     int attempt;   // 0 = zero-padded number, 1 = plain number
+    gboolean latest; // max-episode mode: cb unused, latest_cb gets best
+    int best;
+    FetchLatestCb latest_cb;
 } NyaaSearch;
 
 static void nyaa_search_free(NyaaSearch *s) {
@@ -410,8 +450,12 @@ static void on_nyaa_done(GObject *src, GAsyncResult *res, gpointer data) {
             char *hash = xml_tag(block, "nyaa:infoHash");
             if (t) {
                 char *title = xml_unescape(t);
-                if (title_has_res(title, s->quality) &&
-                    episode_number(title) == s->episode) {
+                if (s->latest) {
+                    int ep = episode_number(title);
+                    if (ep > s->best)
+                        s->best = ep;
+                } else if (title_has_res(title, s->quality) &&
+                           episode_number(title) == s->episode) {
                     FetchResult *r = g_new0(FetchResult, 1);
                     r->episode = s->episode;
                     r->title = title;
@@ -439,6 +483,12 @@ static void on_nyaa_done(GObject *src, GAsyncResult *res, gpointer data) {
     }
     g_free(out);
 
+    if (s->latest) {
+        s->latest_cb(s->best, s->data);
+        nyaa_search_free(s);
+        return;
+    }
+
     // The feed pads single digits ("- 07"); if the padded query found
     // nothing, retry once with the plain number (and vice versa).
     if (arr->len == 0 && s->attempt == 0) {
@@ -458,12 +508,17 @@ static void on_nyaa_done(GObject *src, GAsyncResult *res, gpointer data) {
 }
 
 static void nyaa_fetch(NyaaSearch *s) {
-    char epbuf[16];
-    if (s->attempt == 0)
-        g_snprintf(epbuf, sizeof epbuf, "%02d", s->episode);
-    else
-        g_snprintf(epbuf, sizeof epbuf, "%d", s->episode);
-    char *raw = g_strdup_printf("[Erai-raws] %s %s", s->show, epbuf);
+    char *raw;
+    if (s->latest) {
+        raw = g_strdup_printf("[Erai-raws] %s", s->show);
+    } else {
+        char epbuf[16];
+        if (s->attempt == 0)
+            g_snprintf(epbuf, sizeof epbuf, "%02d", s->episode);
+        else
+            g_snprintf(epbuf, sizeof epbuf, "%d", s->episode);
+        raw = g_strdup_printf("[Erai-raws] %s %s", s->show, epbuf);
+    }
     char *q = g_uri_escape_string(raw, NULL, FALSE);
     g_free(raw);
     char *url =
@@ -477,9 +532,53 @@ static void nyaa_fetch(NyaaSearch *s) {
         g_subprocess_communicate_utf8_async(proc, NULL, NULL, on_nyaa_done,
                                             s);
         g_object_unref(proc);
+    } else if (s->latest) {
+        s->latest_cb(s->best, s->data);
+        nyaa_search_free(s);
     } else {
         reply_empty(s->cb, s->data);
         nyaa_search_free(s);
+    }
+}
+
+typedef struct {
+    FetchLatestCb cb;
+    gpointer data;
+} LatestEmptyCtx;
+
+static gboolean latest_empty_idle(gpointer data) {
+    LatestEmptyCtx *c = data;
+    c->cb(0, c->data);
+    g_free(c);
+    return G_SOURCE_REMOVE;
+}
+
+void fetch_latest(FetchProvider provider, const char *show,
+                  FetchLatestCb cb, gpointer user_data) {
+    if (!show || !*show) {
+        LatestEmptyCtx *c = g_new0(LatestEmptyCtx, 1);
+        c->cb = cb;
+        c->data = user_data;
+        g_idle_add(latest_empty_idle, c);
+        return;
+    }
+    if (provider == FETCH_ERAI) {
+        NyaaSearch *s = g_new0(NyaaSearch, 1);
+        s->data = user_data;
+        s->show = g_strdup(show);
+        s->episode = -1;
+        s->quality = g_strdup("1080"); // unused in latest mode
+        s->latest = TRUE;
+        s->latest_cb = cb;
+        nyaa_fetch(s);
+    } else {
+        SpSearch *s = g_new0(SpSearch, 1);
+        s->data = user_data;
+        s->show = g_strdup(show);
+        s->page = 0;
+        s->latest = TRUE;
+        s->latest_cb = cb;
+        sp_fetch_page(s);
     }
 }
 
@@ -807,6 +906,7 @@ struct FetchDlg {
     gboolean searching;
     guint search_gen; // bumped when provider/quality changes
     int tails_pending;
+    int tails_failed; // groups whose aired count stayed unknown
     gboolean closed;
     int pending; // in-flight async ops; struct is freed when 0 + closed
     void (*done)(gpointer);
@@ -851,7 +951,16 @@ static void update_summary(FetchDlg *dlg) {
     }
     char *txt;
     if (dlg->missing->len == 0) {
-        txt = g_strdup("Nothing missing — the collection is complete.");
+        if (dlg->tails_pending > 0) {
+            txt = g_strdup("Checking for aired episodes…");
+        } else if (dlg->tails_failed > 0) {
+            // never claim "complete" when verification was impossible
+            txt = g_strdup("No gaps found locally, but the aired count is "
+                           "unknown — metadata and provider lookups failed. "
+                           "Check the spelling or try the other provider.");
+        } else {
+            txt = g_strdup("Nothing missing — the collection is complete.");
+        }
     } else if (dlg->tails_pending > 0) {
         txt = g_strdup_printf("%u missing · resolving aired counts…",
                               dlg->missing->len);
@@ -859,6 +968,10 @@ static void update_summary(FetchDlg *dlg) {
         txt = g_strdup_printf(
             "%u missing · pick a provider and press Find",
             dlg->missing->len);
+    } else if (!dlg->searching && found == 0 && dlg->search_idx > 0) {
+        txt = g_strdup_printf("%u missing · no matches — try the other "
+                              "provider or another spelling",
+                              dlg->missing->len);
     } else {
         txt = g_strdup_printf("%u missing · %d found · %d downloaded",
                               dlg->missing->len, found, done);
@@ -1238,33 +1351,14 @@ typedef struct {
     FetchDlg *dlg;
     int gidx;
     int local_max;
+    // provider-term candidates walked on empty answers: (group, selected),
+    // (series, selected), (group, other), (series, other) — identical
+    // (term, provider) pairs are skipped
+    int attempt;
 } TailCtx;
 
-// Episodes aired past the local max (AniList tail) become fetchable rows.
-static void on_tail_info(const AniInfo *info, gpointer data) {
-    TailCtx *t = data;
-    FetchDlg *dlg = t->dlg;
-    if (!dlg->closed && info && info->ok) {
-        int expected =
-            (info->airing && info->aired > 0) ? info->aired : info->episodes;
-        if (expected > t->local_max) {
-            FetchGroup *g = dlg->groups->pdata[t->gidx];
-            int cap = MIN(expected, t->local_max + MAX_TAIL_PER_GROUP);
-            for (int ep = t->local_max + 1; ep <= cap; ep++)
-                miss_add_row(dlg, g, t->gidx, ep);
-            if (expected > cap && !dlg->closed) {
-                char *txt = g_strdup_printf(
-                    "%s: showing first %d of %d aired-but-missing",
-                    g->label, cap - t->local_max,
-                    expected - t->local_max);
-                GtkWidget *note = gtk_label_new(txt);
-                g_free(txt);
-                gtk_widget_add_css_class(note, "dim-label");
-                gtk_label_set_xalign(GTK_LABEL(note), 0.0);
-                gtk_list_box_append(GTK_LIST_BOX(dlg->list), note);
-            }
-        }
-    }
+// one metadata leg finished (AniList answer or provider latest)
+static void tail_leg_done(FetchDlg *dlg) {
     if (--dlg->tails_pending == 0 && !dlg->closed) {
         // Tails may have landed behind an already-finished Find pass;
         // restart the chain at the top (completed rows are skipped).
@@ -1274,8 +1368,87 @@ static void on_tail_info(const AniInfo *info, gpointer data) {
         }
         update_summary(dlg);
     }
-    g_free(t);
     dlg_op_done(dlg);
+}
+
+static void add_tail_rows(FetchDlg *dlg, int gidx, int from, int to) {
+    FetchGroup *g = dlg->groups->pdata[gidx];
+    int cap = MIN(to, from - 1 + MAX_TAIL_PER_GROUP);
+    for (int ep = from; ep <= cap; ep++)
+        miss_add_row(dlg, g, gidx, ep);
+    if (to > cap) {
+        char *txt = g_strdup_printf(
+            "%s: showing first %d of %d aired-but-missing", g->label,
+            cap - from + 1, to - from + 1);
+        GtkWidget *note = gtk_label_new(txt);
+        g_free(txt);
+        gtk_widget_add_css_class(note, "dim-label");
+        gtk_label_set_xalign(GTK_LABEL(note), 0.0);
+        gtk_list_box_append(GTK_LIST_BOX(dlg->list), note);
+    }
+}
+
+// Provider fallback for the tail: highest released episode becomes the
+// expected count when AniList/Kitsu has nothing usable. Walks every
+// (term, provider) candidate so a spelling the selected provider doesn't
+// use (e.g. "Shite mo" vs SubsPlease's "shitemo") still resolves.
+static void on_latest(int latest, gpointer data);
+
+static void latest_next(TailCtx *t) {
+    FetchDlg *dlg = t->dlg;
+    FetchGroup *g = dlg->groups->pdata[t->gidx];
+    FetchProvider other = dlg->provider == FETCH_ERAI ? FETCH_SUBSPLEASE
+                                                      : FETCH_ERAI;
+    for (t->attempt++; t->attempt < 4; t->attempt++) {
+        const char *term = (t->attempt % 2 == 0) ? g->search : dlg->series;
+        FetchProvider p = (t->attempt < 2) ? dlg->provider : other;
+        if (t->attempt % 2 == 1 && g_strcmp0(g->search, dlg->series) == 0)
+            continue; // bare series == group term: identical query
+        dlg->tails_pending++;
+        dlg_op_start(dlg);
+        fetch_latest(p, term, on_latest, t);
+        return;
+    }
+    dlg->tails_failed++;
+    g_free(t);
+}
+
+static void on_latest(int latest, gpointer data) {
+    TailCtx *t = data;
+    FetchDlg *dlg = t->dlg;
+    if (!dlg->closed) {
+        if (latest > t->local_max) {
+            add_tail_rows(dlg, t->gidx, t->local_max + 1, latest);
+            g_free(t);
+        } else {
+            latest_next(t); // next candidate, or failed+freed
+        }
+    } else {
+        g_free(t);
+    }
+    tail_leg_done(dlg);
+}
+
+// Episodes aired past the local max become fetchable rows: AniList first,
+// falling back to the provider's latest release when metadata has no
+// usable count (unknown show, count-less Kitsu fallback, stale cache…).
+static void on_tail_info(const AniInfo *info, gpointer data) {
+    TailCtx *t = data;
+    FetchDlg *dlg = t->dlg;
+    int expected = -1;
+    if (info && info->ok)
+        expected =
+            (info->airing && info->aired > 0) ? info->aired : info->episodes;
+    if (!dlg->closed && expected > t->local_max) {
+        add_tail_rows(dlg, t->gidx, t->local_max + 1, expected);
+        g_free(t);
+    } else if (!dlg->closed) {
+        t->attempt = -1;
+        latest_next(t); // first (term, provider) candidate
+    } else {
+        g_free(t);
+    }
+    tail_leg_done(dlg);
 }
 
 // Gaps inside the local runs are known synchronously; tails resolve async.
